@@ -1,26 +1,13 @@
 # Developer Protocol
 
 **Server:** gutenberg-mcp-server
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.19`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
-
----
-
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
 
 ---
 
@@ -60,91 +47,62 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const gutenbergSearchBooks = tool('gutenberg_search_books', {
+  description: 'Search the Project Gutenberg catalog of 78,000+ public-domain books.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    query: z.string().optional().describe('Words to match against book titles and author names.'),
+    languages: z.array(z.string().min(2).max(2)).optional().describe('ISO 639-1 language codes.'),
+    page: z.number().int().positive().default(1).describe('Page number (1-indexed, up to 32 per page).'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    books: z.array(z.object({
+      id: z.number().describe('Gutenberg ID.'),
+      title: z.string().describe('Book title.'),
+      has_plain_text: z.boolean().describe('True if gutenberg_get_text will work for this book.'),
+    })).describe('Matching books.'),
+    totalCount: z.number().describe('Total books matching the query.'),
+    hasMore: z.boolean().describe('True if more pages are available.'),
   }),
-  auth: ['inventory:read'],
-
+  errors: [
+    { reason: 'no_results', code: JsonRpcErrorCode.NotFound,
+      when: 'No books matched the query.',
+      recovery: 'Broaden the search — try fewer words, remove language filters, or check the topic spelling.' },
+  ],
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const result = await getGutendexService().searchBooks(input, ctx);
+    if (result.books.length === 0) throw ctx.fail('no_results', 'No books matched.');
+    return result;
   },
-
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: result.books.map(b => `**[${b.id}]** ${b.title} (text: ${b.has_plain_text ? 'yes' : 'no'})`).join('\n'),
   }],
-});
-```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
 });
 ```
 
 ### Server config
 
 ```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
+// src/config/server-config.ts
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  gutendexBaseUrl: z.string().url().default('https://gutendex.com/books/')
+    .describe('Base URL for the Gutendex catalog API.'),
+  gutenbergTextBaseUrl: z.string().url().default('https://www.gutenberg.org')
+    .describe('Base URL for Project Gutenberg file servers.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    gutendexBaseUrl: 'GUTENDEX_BASE_URL',
+    gutenbergTextBaseUrl: 'GUTENBERG_TEXT_BASE_URL',
   });
   return _config;
 }
@@ -223,20 +181,22 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers tools, inits services
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # URL overrides for Gutendex and Gutenberg file servers
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    gutendex/
+      gutendex-service.ts               # Gutendex catalog API client
+      types.ts                          # Catalog domain types
+    gutenberg-text/
+      gutenberg-text-service.ts         # Plain-text retrieval, boilerplate stripping, caching, chunking
+      types.ts                          # Text service types
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      gutenberg-search-books.tool.ts    # Search catalog by title/author/topic/language
+      gutenberg-get-book.tool.ts        # Fetch full metadata by ID
+      gutenberg-get-text.tool.ts        # Retrieve plain text with offset/limit chunking
+      gutenberg-browse-popular.tool.ts  # Browse most-downloaded books
 ```
 
 ---
