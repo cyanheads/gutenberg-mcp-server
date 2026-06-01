@@ -5,16 +5,9 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getGutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
-
-/**
- * Module-level constant so that handler.toString() does not contain
- * `JsonRpcErrorCode.NotFound` — the api-linter's error-contract-prefer-fail
- * heuristic scans handler source text for that pattern and would misfire.
- */
-const CATALOG_NOT_FOUND_CODE = JsonRpcErrorCode.NotFound;
 
 export const gutenbergGetText = tool('gutenberg_get_text', {
   title: 'Get Gutenberg Book Text',
@@ -135,9 +128,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     const book = await getGutendexService()
       .getBook(input.id, ctx)
       .catch((err: unknown) => {
-        const e = err as { code?: number };
-        // NotFound from getBook → propagate as not_found
-        if (e?.code === CATALOG_NOT_FOUND_CODE) {
+        if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
           throw ctx.fail('not_found', `No book found with Gutenberg ID ${input.id}.`, {
             ...ctx.recoveryFor('not_found'),
           });

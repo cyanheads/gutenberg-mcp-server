@@ -77,6 +77,27 @@ function rewriteToHttpsCachePath(id: number, baseUrl: string): string {
   return `${base}/cache/epub/${id}/pg${id}.txt`;
 }
 
+/**
+ * Ensure a URL uses HTTPS; resolve relative URLs against baseUrl.
+ * Validates that the resulting URL's host matches the expected base host —
+ * guards against SSRF when format URLs come from upstream API responses.
+ */
+function toHttps(rawUrl: string, baseUrl: string): string {
+  const absolute = rawUrl.startsWith('http')
+    ? rawUrl.replace(/^http:\/\//, 'https://')
+    : `${baseUrl}${rawUrl}`;
+
+  const expectedHost = new URL(baseUrl).host;
+  const actualHost = new URL(absolute).host;
+  if (actualHost !== expectedHost) {
+    throw new Error(
+      `Upstream format URL host "${actualHost}" does not match expected Gutenberg host "${expectedHost}" — refusing fetch.`,
+    );
+  }
+
+  return absolute;
+}
+
 export class GutenbergTextService {
   private readonly textBaseUrl: string;
 
@@ -102,19 +123,14 @@ export class GutenbergTextService {
 
     if ('text/plain; charset=us-ascii' in fmt) {
       // Direct URL from formats map — served over HTTPS without redirect
-      const rawUrl = fmt['text/plain; charset=us-ascii'];
-      const resolved = rawUrl.startsWith('http')
-        ? rawUrl.replace(/^http:\/\//, 'https://')
-        : `${this.textBaseUrl}${rawUrl}`;
-      return { url: resolved, format: 'text/plain; charset=us-ascii' };
+      return {
+        url: toHttps(fmt['text/plain; charset=us-ascii'], this.textBaseUrl),
+        format: 'text/plain; charset=us-ascii',
+      };
     }
 
     if ('text/html' in fmt) {
-      const rawUrl = fmt['text/html'];
-      const resolved = rawUrl.startsWith('http')
-        ? rawUrl.replace(/^http:\/\//, 'https://')
-        : `${this.textBaseUrl}${rawUrl}`;
-      return { url: resolved, format: 'text/html' };
+      return { url: toHttps(fmt['text/html'], this.textBaseUrl), format: 'text/html' };
     }
 
     return null;
@@ -153,18 +169,18 @@ export class GutenbergTextService {
   private processRaw(raw: string, format: SourceFormat): FetchedText {
     let text = raw;
 
-    // Step 3: Strip BOM (UTF-8 files only, but harmless to check for all)
+    // Strip BOM (UTF-8 files only, but harmless to check for all)
     text = stripBom(text);
 
-    // Step 7: If HTML, convert to plain text first
+    // If HTML, convert to plain text first
     if (format === 'text/html') {
       text = htmlToText(text);
     }
 
-    // Step 6: Normalize CRLF → LF and collapse blank lines
+    // Normalize CRLF → LF and collapse blank lines
     text = normalizeWhitespace(text);
 
-    // Step 5: Extract literary content between START/END markers
+    // Extract literary content between START/END markers
     const extracted = extractLiteraryContent(text);
     if (extracted !== null) {
       text = extracted;

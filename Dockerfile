@@ -38,7 +38,8 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="gutenberg-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="MCP server for Project Gutenberg — 75,000+ public-domain ebooks, searchable with full plain-text retrieval."
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/gutenberg-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy dependency manifests

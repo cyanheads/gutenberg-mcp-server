@@ -4,7 +4,7 @@
  * @module tests/tools/gutenberg-get-text.tool.test
  */
 
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetText } from '@/mcp-server/tools/definitions/gutenberg-get-text.tool.js';
@@ -347,10 +347,9 @@ describe('GutenbergTextService.processRaw — boilerplate stripping', () => {
 
 describe('gutenbergGetText — error paths', () => {
   it('throws ctx.fail("not_found") when the book does not exist', async () => {
-    mockGutendexService.getBook.mockRejectedValue({
-      code: JsonRpcErrorCode.NotFound,
-      message: 'Not found',
-    });
+    mockGutendexService.getBook.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.NotFound, 'Not found'),
+    );
     const ctx = createMockContext({ errors: gutenbergGetText.errors });
     const input = gutenbergGetText.input.parse({ id: 9999999 });
 

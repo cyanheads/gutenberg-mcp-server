@@ -3,7 +3,7 @@
  * @module tests/tools/gutenberg-get-book.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
@@ -95,8 +95,9 @@ describe('gutenbergGetBook', () => {
   });
 
   it('propagates NotFound when service throws for a nonexistent ID', async () => {
-    const notFoundErr = { code: JsonRpcErrorCode.NotFound, message: 'Not found' };
-    mockGutendexService.getBook.mockRejectedValue(notFoundErr);
+    mockGutendexService.getBook.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.NotFound, 'Not found'),
+    );
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
     const input = gutenbergGetBook.input.parse({ id: 9999999 });
 

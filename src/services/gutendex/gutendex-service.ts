@@ -8,7 +8,12 @@
 import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { JsonRpcErrorCode, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -164,8 +169,7 @@ export class GutendexService {
           signal: ctx.signal,
           headers: { Accept: 'application/json' },
         }).catch((err: unknown) => {
-          const e = err as { code?: number };
-          if (e?.code === JsonRpcErrorCode.NotFound) {
+          if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
             throw notFound(`No book found with Gutenberg ID ${id}.`, { reason: 'not_found' });
           }
           throw err;
