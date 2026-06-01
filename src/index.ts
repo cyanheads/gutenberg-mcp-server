@@ -1,21 +1,32 @@
 #!/usr/bin/env node
 /**
- * @fileoverview gutenberg-mcp-server MCP server entry point.
+ * @fileoverview gutenberg-mcp-server MCP server entry point. Registers all tool
+ * definitions and initializes the Gutendex catalog and Gutenberg text services.
  * @module index
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
+import { getServerConfig } from './config/server-config.js';
+import { gutenbergBrowsePopular } from './mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
+import { gutenbergGetBook } from './mcp-server/tools/definitions/gutenberg-get-book.tool.js';
+import { gutenbergGetText } from './mcp-server/tools/definitions/gutenberg-get-text.tool.js';
+import { gutenbergSearchBooks } from './mcp-server/tools/definitions/gutenberg-search-books.tool.js';
+import { initGutenbergTextService } from './services/gutenberg-text/gutenberg-text-service.js';
+import { initGutendexService } from './services/gutendex/gutendex-service.js';
 
 await createApp({
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
-  // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
-  //   '- Use shortcut `X` for the most common case\n' +
-  //   '- Tools require auth via the `inventory:read` scope',
+  tools: [gutenbergSearchBooks, gutenbergGetBook, gutenbergGetText, gutenbergBrowsePopular],
+  resources: [],
+  prompts: [],
+  instructions:
+    'Project Gutenberg MCP server. No API key required. ' +
+    'Typical workflow: gutenberg_search_books → gutenberg_get_book → gutenberg_get_text. ' +
+    'Use gutenberg_browse_popular for discovery. ' +
+    'gutenberg_get_text supports offset/limit chunking for long works — novels routinely exceed 500KB. ' +
+    'Only books with has_plain_text=true can be read with gutenberg_get_text.',
+  setup(core) {
+    const serverConfig = getServerConfig();
+    initGutendexService(core.config, core.storage, serverConfig);
+    initGutenbergTextService(core.config, core.storage, serverConfig);
+  },
 });
