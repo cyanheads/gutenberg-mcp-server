@@ -182,7 +182,7 @@ export class GutenbergTextService {
    * Throws text_fetch_failed on HTTP/network errors, no_text_format if no usable format.
    */
   async fetchAndCacheText(book: Book, id: number, ctx: Context): Promise<CachedText> {
-    const cacheKey = `gutenberg:text:${id}`;
+    const cacheKey = `gutenberg/text/${id}`;
 
     const cached = await ctx.state.get<CachedText>(cacheKey);
     if (cached) {

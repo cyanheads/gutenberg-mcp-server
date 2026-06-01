@@ -5,6 +5,7 @@
  * @module services/gutendex/gutendex-service
  */
 
+import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
@@ -12,6 +13,15 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { Book, RawBook, RawBooksPage, RawPerson, SearchParams } from './types.js';
+
+/**
+ * Hash a URL to a storage-safe key (alphanumeric only).
+ * The framework's key validator rejects query-string characters (?, =, +, &).
+ */
+function urlCacheKey(prefix: string, url: string): string {
+  const hash = createHash('sha256').update(url).digest('hex');
+  return `${prefix}${hash}`;
+}
 
 const CATALOG_TIMEOUT_MS = 15_000;
 const CATALOG_TTL_SECONDS = 3600; // 1 hour
@@ -78,7 +88,7 @@ export class GutendexService {
 
   /** Fetch and parse a raw Gutendex page, with cache. */
   private async fetchPage(url: string, ctx: Context): Promise<RawBooksPage> {
-    const cacheKey = `gutendex:page:${url}`;
+    const cacheKey = urlCacheKey('gutendex/page/', url);
 
     const cached = await ctx.state.get<RawBooksPage>(cacheKey);
     if (cached) {
@@ -134,7 +144,7 @@ export class GutendexService {
   /** Fetch a single book by Gutenberg ID. Throws not_found if 404. */
   async getBook(id: number, ctx: Context): Promise<Book> {
     const url = `${this.baseUrl}${id}/`;
-    const cacheKey = `gutendex:book:${id}`;
+    const cacheKey = `gutendex/book/${id}`;
 
     const cached = await ctx.state.get<RawBook>(cacheKey);
     if (cached) {

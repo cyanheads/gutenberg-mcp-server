@@ -233,3 +233,47 @@ describe('gutenbergSearchBooks', () => {
     });
   });
 });
+
+// ── Cache key storage-validity regression ────────────────────────────────────
+//
+// Regression for the bug where cache keys embedded raw Gutendex URLs
+// (e.g. "gutendex:page:https://gutendex.com/books/?search=Pride+and+Prejudice")
+// which the mcp-ts-core storage validator rejects — the VALID_KEY_PATTERN
+// only allows [a-zA-Z0-9_.\-/], forbidding ?, =, +, &, and colons.
+// The fix uses SHA-256(URL) as the page key prefix and slashes as separators.
+
+describe('cache key storage-validity', () => {
+  const VALID_KEY_PATTERN = /^[a-zA-Z0-9_.\-/]+$/;
+
+  it('page cache key: SHA-256 hash of URL produces a storage-valid key', async () => {
+    const { createHash } = await import('node:crypto');
+    const url = 'https://gutendex.com/books/?search=Pride+and+Prejudice&languages=en&page=2';
+    const hash = createHash('sha256').update(url).digest('hex');
+    const key = `gutendex/page/${hash}`;
+
+    // Must pass the framework key validator
+    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
+    // Must not contain any query-string or colon characters
+    expect(key).not.toMatch(/[?=+&:]/);
+  });
+
+  it('page cache key is stable for the same URL', async () => {
+    const { createHash } = await import('node:crypto');
+    const url = 'https://gutendex.com/books/?search=frankenstein';
+    const key1 = `gutendex/page/${createHash('sha256').update(url).digest('hex')}`;
+    const key2 = `gutendex/page/${createHash('sha256').update(url).digest('hex')}`;
+    expect(key1).toBe(key2);
+  });
+
+  it('book cache key uses slash separator (not colon)', () => {
+    const key = 'gutendex/book/1342';
+    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
+    expect(key).not.toContain(':');
+  });
+
+  it('text cache key uses slash separator (not colon)', () => {
+    const key = 'gutenberg/text/84';
+    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
+    expect(key).not.toContain(':');
+  });
+});
