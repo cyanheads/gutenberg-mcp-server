@@ -1,0 +1,20 @@
+{
+  "name": "@cyanheads/gutenberg-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for Project Gutenberg — 75,000+ public-domain ebooks, searchable with full plain-text retrieval.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/gutenberg-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/gutenberg-mcp-server",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "@cyanheads/gutenberg-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/gutenberg-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
