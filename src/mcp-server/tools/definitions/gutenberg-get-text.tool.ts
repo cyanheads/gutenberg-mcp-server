@@ -92,7 +92,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     },
     {
       reason: 'audio_book',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The book is an audio recording (media_type "Sound"), not a text book — no literary plain text is available.',
       recovery:
         'This Gutenberg entry is an audio book. Use gutenberg_search_books or gutenberg_get_book to find a text edition of the same work, then call gutenberg_get_text on that ID.',
@@ -106,7 +106,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     },
     {
       reason: 'offset_out_of_range',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The offset is greater than or equal to totalChars (past the end of the book).',
       recovery:
         "Use an offset less than totalChars. A prior response's remainingChars field shows how much text is left.",

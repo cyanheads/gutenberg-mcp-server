@@ -365,7 +365,7 @@ describe('gutenbergGetText — error paths', () => {
     const input = gutenbergGetText.input.parse({ id: 55555 });
 
     await expect(gutenbergGetText.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'audio_book' },
     });
   });
@@ -394,7 +394,7 @@ describe('gutenbergGetText — error paths', () => {
     const input = gutenbergGetText.input.parse({ id: 84, offset: pastEnd });
 
     await expect(gutenbergGetText.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'offset_out_of_range' },
     });
   });

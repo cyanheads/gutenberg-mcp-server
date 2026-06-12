@@ -15,6 +15,8 @@ import { initGutenbergTextService } from './services/gutenberg-text/gutenberg-te
 import { initGutendexService } from './services/gutendex/gutendex-service.js';
 
 await createApp({
+  name: 'gutenberg-mcp-server',
+  title: 'gutenberg-mcp-server',
   tools: [gutenbergSearchBooks, gutenbergGetBook, gutenbergGetText, gutenbergBrowsePopular],
   resources: [],
   prompts: [],

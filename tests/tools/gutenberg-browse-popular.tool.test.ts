@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergBrowsePopular } from '@/mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
 
@@ -55,6 +55,43 @@ describe('gutenbergBrowsePopular', () => {
     expect(result.books).toHaveLength(5);
     expect(result.books[0].id).toBe(1);
     expect(result.totalInCatalog).toBe(65000);
+  });
+
+  it('discloses truncation when the catalog holds more than the returned page', async () => {
+    const allBooks = Array.from({ length: 32 }, (_, i) => makeBook(i + 1));
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: allBooks,
+      totalCount: 65000,
+      hasMore: true,
+      page: 1,
+    });
+
+    const ctx = createMockContext({ errors: gutenbergBrowsePopular.errors });
+    const input = gutenbergBrowsePopular.input.parse({ limit: 5 });
+    await gutenbergBrowsePopular.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).toMatchObject({
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      truncationCeiling: makeBook(5).download_count,
+    });
+  });
+
+  it('omits truncation disclosure when all matches are returned', async () => {
+    const allBooks = Array.from({ length: 3 }, (_, i) => makeBook(i + 1));
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: allBooks,
+      totalCount: 3,
+      hasMore: false,
+      page: 1,
+    });
+
+    const ctx = createMockContext({ errors: gutenbergBrowsePopular.errors });
+    const input = gutenbergBrowsePopular.input.parse({ limit: 20 });
+    await gutenbergBrowsePopular.handler(input, ctx);
+
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
   });
 
   it('applies limit default of 20', async () => {

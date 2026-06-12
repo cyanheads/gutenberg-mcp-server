@@ -82,6 +82,18 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       ),
   }),
 
+  enrichment: {
+    truncated: z.boolean().describe('True when the catalog held more matches than were returned.'),
+    shown: z.number().describe('Number of books returned in this response.'),
+    cap: z.number().describe('The limit that was applied.'),
+    truncationCeiling: z
+      .number()
+      .optional()
+      .describe(
+        'Download count of the least-popular book shown — omitted books have at most this many downloads.',
+      ),
+  },
+
   errors: [
     {
       reason: 'no_results',
@@ -115,6 +127,17 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     }
 
     const limited = result.books.slice(0, input.limit);
+
+    if (result.totalCount > limited.length) {
+      const ceiling = limited.at(-1)?.download_count;
+      ctx.enrich.truncated({
+        shown: limited.length,
+        cap: input.limit,
+        ...(ceiling !== undefined && { ceiling }),
+        guidance:
+          'The catalog holds more matches than shown. Raise limit (max 32) for a longer list, or use gutenberg_search_books to page through all results.',
+      });
+    }
 
     return {
       books: limited.map((b) => ({
