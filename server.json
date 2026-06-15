@@ -6,14 +6,20 @@
     "url": "https://github.com/cyanheads/gutenberg-mcp-server",
     "source": "github"
   },
-  "version": "0.1.2",
+  "version": "0.1.3",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://gutenberg.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/gutenberg-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "packageArguments": [
         {
           "type": "positional",
@@ -42,7 +48,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/gutenberg-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "packageArguments": [
         {
           "type": "positional",

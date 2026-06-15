@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-15
+
+Public hosted endpoint at https://gutenberg.caseyjhand.com/mcp
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-06-12
 
 Adopt @cyanheads/mcp-ts-core ^0.10.6 — truncation enrichment on browse, machine-name identity, packaging hardening
