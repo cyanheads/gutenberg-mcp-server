@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "gutenberg-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MCP server for Project Gutenberg — 75,000+ public-domain ebooks, searchable with full plain-text retrieval.",
   "author": { "name": "cyanheads" },
   "server": {
