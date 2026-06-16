@@ -1,5 +1,5 @@
 {
-  "@cyanheads/gutenberg-mcp-server": {
+  "gutenberg-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/gutenberg-mcp-server"],
     "env": {
