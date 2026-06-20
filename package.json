@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/gutenberg-mcp-server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "mcpName": "io.github.cyanheads/gutenberg-mcp-server",
   "description": "MCP server for Project Gutenberg — 75,000+ public-domain ebooks, searchable with full plain-text retrieval.",
   "type": "module",
@@ -86,13 +86,13 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.10.6",
+    "@cyanheads/mcp-ts-core": "^0.10.9",
     "pino-pretty": "^13.1.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
-    "@types/node": "^25.9.3",
+    "@types/node": "^26.0.0",
     "@vitest/coverage-istanbul": "^4.1.9",
     "depcheck": "^1.4.7",
     "fast-check": "^4.8.0",

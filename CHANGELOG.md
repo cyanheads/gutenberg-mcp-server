@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-20
+
+Maintenance: @cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9 (fresh-scaffold devcheck guards, ctx.content, SQL gate classification), new dependency-specifier + plugin-manifest devcheck steps, @types/node ^26
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-15
 
 Public hosted endpoint at https://gutenberg.caseyjhand.com/mcp
