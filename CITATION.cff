@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: gutenberg-mcp-server
+abstract: "MCP server for Project Gutenberg — 75,000+ public-domain ebooks, searchable with full plain-text retrieval."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/gutenberg-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - project-gutenberg
+  - ebooks
+  - public-domain
+  - literature
