@@ -28,6 +28,24 @@ function urlCacheKey(prefix: string, url: string): string {
   return `${prefix}${hash}`;
 }
 
+/**
+ * Gutendex answers a page beyond the result set with HTTP 404 +
+ * `{"detail":"Invalid page."}`. `fetchWithTimeout` surfaces that body on
+ * `McpError.data.responseBody`; key the page-out-of-range translation off that
+ * exact shape so genuinely-missing resources (any other 404) aren't
+ * misclassified as an out-of-range page.
+ */
+function isInvalidPageResponse(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const body = (data as { responseBody?: unknown }).responseBody;
+  if (typeof body !== 'string') return false;
+  try {
+    return (JSON.parse(body) as { detail?: unknown }).detail === 'Invalid page.';
+  } catch {
+    return false;
+  }
+}
+
 const CATALOG_TIMEOUT_MS = 15_000;
 const CATALOG_TTL_SECONDS = 3600; // 1 hour
 
@@ -107,9 +125,25 @@ export class GutendexService {
           parentContext: ctx as unknown as Record<string, unknown>,
           operation: 'GutendexService.fetchPage',
         });
+        // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
+        // transient set, so withRetry won't retry it. Gutendex returns 404 +
+        // {"detail":"Invalid page."} when the requested page is past the last
+        // page for a query; translate only that shape to a distinct domain
+        // reason the tool can surface with recovery, and let other 404s bubble.
         const response = await fetchWithTimeout(url, CATALOG_TIMEOUT_MS, reqCtx, {
           signal: ctx.signal,
           headers: { Accept: 'application/json' },
+        }).catch((err: unknown) => {
+          if (
+            err instanceof McpError &&
+            err.code === JsonRpcErrorCode.NotFound &&
+            isInvalidPageResponse(err.data)
+          ) {
+            throw notFound('The requested page is beyond the available result range.', {
+              reason: 'page_out_of_range',
+            });
+          }
+          throw err;
         });
         const text = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {

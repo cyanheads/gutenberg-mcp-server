@@ -3,7 +3,7 @@
  * @module tests/tools/gutenberg-search-books.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
@@ -137,6 +137,44 @@ describe('gutenbergSearchBooks', () => {
     await expect(gutenbergSearchBooks.handler(input, ctx)).rejects.toThrow('Network error');
   });
 
+  it('translates a page_out_of_range service error into ctx.fail with recovery', async () => {
+    // The service tags a Gutendex "Invalid page." 404 as reason page_out_of_range;
+    // the handler must re-throw it as a ValidationError carrying recovery guidance
+    // rather than leaking the raw upstream fetch error.
+    mockGutendexService.searchBooks.mockRejectedValue(
+      new McpError(
+        JsonRpcErrorCode.NotFound,
+        'The requested page is beyond the available result range.',
+        { reason: 'page_out_of_range' },
+      ),
+    );
+    const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+    const input = gutenbergSearchBooks.input.parse({ query: 'pride prejudice', page: 2 });
+
+    await expect(gutenbergSearchBooks.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'page_out_of_range',
+        recovery: { hint: expect.stringContaining('within the available range') },
+      },
+    });
+  });
+
+  it('does not misclassify a generic NotFound as page_out_of_range', async () => {
+    // A NotFound without the page_out_of_range reason must bubble unchanged —
+    // the translation keys on the reason tag, not the code alone.
+    mockGutendexService.searchBooks.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.NotFound, 'Some other not-found condition.'),
+    );
+    const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+    const input = gutenbergSearchBooks.input.parse({ query: 'anything', page: 2 });
+
+    const err = await gutenbergSearchBooks.handler(input, ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+    expect((err as McpError).data?.reason).toBeUndefined();
+  });
+
   it('handles a book with no known author years (sparse upstream)', async () => {
     const sparseBook = {
       ...mockBook,
@@ -184,6 +222,41 @@ describe('gutenbergSearchBooks', () => {
       expect(text).toContain('en');
       expect(text).toContain('75');
       expect(text).toContain('Yes');
+    });
+
+    it('renders the full subject list — no 3-item slice, no ellipsis', () => {
+      const subjects = [
+        'Courtship -- Fiction',
+        'Domestic fiction',
+        'England -- Fiction',
+        'Love stories',
+        'Sisters -- Fiction',
+        'Social classes -- Fiction',
+        'Young women -- Fiction',
+      ];
+      const output = {
+        books: [
+          {
+            id: 1342,
+            title: 'Pride and Prejudice',
+            authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+            languages: ['en'],
+            subjects,
+            download_count: 75000,
+            has_plain_text: true,
+          },
+        ],
+        totalCount: 1,
+        page: 1,
+        hasMore: false,
+      };
+      const blocks = gutenbergSearchBooks.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+
+      for (const subject of subjects) {
+        expect(text).toContain(subject);
+      }
+      expect(text).not.toContain('…');
     });
 
     it('appends pagination hint when hasMore is true', () => {

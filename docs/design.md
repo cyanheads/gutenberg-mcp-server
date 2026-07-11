@@ -149,6 +149,12 @@ tool('gutenberg_search_books', {
       when: 'A language code is not a valid two-character ISO 639-1 code.',
       recovery: 'Use two-character language codes such as "en", "fr", "de", "es", "it", "pt", "nl", "fi", "ru".',
     },
+    {
+      reason: 'page_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The requested page number is past the last page of results for this query.',
+      recovery: 'Request a page within the available range, or restart at page 1. The first page reports totalCount — divide it by the page size (32) to find the last page.',
+    },
   ],
 })
 ```

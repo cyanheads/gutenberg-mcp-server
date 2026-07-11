@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
@@ -132,6 +132,13 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       recovery:
         'Broaden the search — try fewer or different query words, remove language filters, or check the topic spelling.',
     },
+    {
+      reason: 'page_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The requested page number is past the last page of results for this query.',
+      recovery:
+        'Request a page within the available range, or restart at page 1. The first page reports totalCount — divide it by the page size (32) to find the last page.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -142,19 +149,38 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       page: input.page,
     });
 
-    const result = await getGutendexService().searchBooks(
-      {
-        query: input.query,
-        topic: input.topic,
-        languages: input.languages?.length ? input.languages : undefined,
-        author_year_start: input.author_year_start,
-        author_year_end: input.author_year_end,
-        sort: input.sort,
-        ids: input.ids?.length ? input.ids : undefined,
-        page: input.page,
-      },
-      ctx,
-    );
+    const result = await getGutendexService()
+      .searchBooks(
+        {
+          query: input.query,
+          topic: input.topic,
+          languages: input.languages?.length ? input.languages : undefined,
+          author_year_start: input.author_year_start,
+          author_year_end: input.author_year_end,
+          sort: input.sort,
+          ids: input.ids?.length ? input.ids : undefined,
+          page: input.page,
+        },
+        ctx,
+      )
+      .catch((err: unknown) => {
+        // The service tags a page-beyond-range 404 with reason 'page_out_of_range';
+        // surface it as a tool-level failure with recovery instead of the raw
+        // upstream fetch error. Any other error bubbles unchanged.
+        if (
+          err instanceof McpError &&
+          typeof err.data === 'object' &&
+          err.data !== null &&
+          (err.data as { reason?: unknown }).reason === 'page_out_of_range'
+        ) {
+          throw ctx.fail(
+            'page_out_of_range',
+            `Page ${input.page} is beyond the available results for this search.`,
+            { ...ctx.recoveryFor('page_out_of_range') },
+          );
+        }
+        throw err;
+      });
 
     if (result.books.length === 0) {
       throw ctx.fail('no_results', 'No books matched the search criteria.', {
@@ -202,9 +228,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
         `  Authors: ${authorStr} | Lang: ${book.languages.join(', ')} | Downloads: ${book.download_count.toLocaleString()} | Text: ${book.has_plain_text ? 'Yes' : 'No'}`,
       );
       if (book.subjects.length > 0) {
-        lines.push(
-          `  Subjects: ${book.subjects.slice(0, 3).join('; ')}${book.subjects.length > 3 ? '…' : ''}`,
-        );
+        lines.push(`  Subjects: ${book.subjects.join('; ')}`);
       }
     }
     if (result.hasMore) {
