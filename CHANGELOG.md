@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-07-11
+
+Fixes gutenberg_search_books/browse_popular/get_book content[] and error-recovery gaps (full subject lists, out-of-range pages, truncation metadata, not_found hints); adopts mcp-ts-core ^0.10.14 with a Socket supply-chain scanner and clears 9 transitive advisories (hono, vite, js-yaml, esbuild) via bun audit.
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-20
 
 Maintenance: @cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9 (fresh-scaffold devcheck guards, ctx.content, SQL gate classification), new dependency-specifier + plugin-manifest devcheck steps, @types/node ^26
