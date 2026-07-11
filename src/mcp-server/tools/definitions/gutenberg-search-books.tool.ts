@@ -113,7 +113,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
             has_plain_text: z
               .boolean()
               .describe(
-                'True if the book has media_type "Text" AND a text/plain format available — prerequisite for gutenberg_get_text.',
+                'True if the book has media_type "Text" AND a UTF-8 text/plain format available — prerequisite for gutenberg_get_text.',
               ),
           })
           .describe('Book entry.'),

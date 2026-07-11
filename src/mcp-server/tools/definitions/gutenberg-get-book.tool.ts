@@ -100,7 +100,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     has_plain_text: z
       .boolean()
       .describe(
-        'True if media_type is "Text" AND a text/plain format (UTF-8 or ASCII) is present in formats — prerequisite for gutenberg_get_text.',
+        'True if media_type is "Text" AND a UTF-8 text/plain format ("text/plain; charset=utf-8") is present in formats — prerequisite for gutenberg_get_text.',
       ),
   }),
 

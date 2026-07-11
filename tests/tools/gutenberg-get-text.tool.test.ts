@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetText } from '@/mcp-server/tools/definitions/gutenberg-get-text.tool.js';
 import { GutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
 import type { CachedText } from '@/services/gutenberg-text/types.js';
+import type { Book } from '@/services/gutendex/types.js';
 
 // ── Service mocks ────────────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ beforeEach(() => {
           _sc: unknown,
         ) => GutenbergTextService
       )(null, null, {
-        gutenbergTextBaseUrl: 'https://www.gutenberg.org',
+        gutenbergTextBaseUrl: 'https://gutenberg.pglaf.org',
         gutendexBaseUrl: 'https://gutendex.com/books/',
       });
       return realService.chunkText(cached, offset, limit);
@@ -230,7 +231,7 @@ describe('GutenbergTextService.processRaw — boilerplate stripping', () => {
         _sc: unknown,
       ) => GutenbergTextService
     )(null, null, {
-      gutenbergTextBaseUrl: 'https://www.gutenberg.org',
+      gutenbergTextBaseUrl: 'https://gutenberg.pglaf.org',
       gutendexBaseUrl: 'https://gutendex.com/books/',
     });
   }
@@ -386,6 +387,27 @@ describe('gutenbergGetText — error paths', () => {
     });
   });
 
+  it('throws ctx.fail("no_text_format") with a recovery hint for an ascii-only book, without calling the text service', async () => {
+    // us-ascii has no compliant mirror path — the tool-level guard must catch this
+    // itself (and populate the declared recovery hint via ctx.fail) rather than
+    // falling through to GutenbergTextService, whose own no_text_format throw is a
+    // bare error factory call with no recovery data.
+    const asciiOnlyBook = {
+      ...textBook,
+      formats: { 'text/plain; charset=us-ascii': 'https://www.gutenberg.org/files/52/52.txt' },
+      has_plain_text: false,
+    };
+    mockGutendexService.getBook.mockResolvedValue(asciiOnlyBook);
+    const ctx = createMockContext({ errors: gutenbergGetText.errors });
+    const input = gutenbergGetText.input.parse({ id: 52 });
+
+    await expect(gutenbergGetText.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_text_format', recovery: { hint: expect.any(String) } },
+    });
+    expect(mockTextService.fetchAndCacheText).not.toHaveBeenCalled();
+  });
+
   it('throws ctx.fail("offset_out_of_range") when offset ≥ totalChars', async () => {
     mockGutendexService.getBook.mockResolvedValue(textBook);
     mockTextService.fetchAndCacheText.mockResolvedValue(cachedText);
@@ -469,5 +491,93 @@ describe('gutenbergGetText — format()', () => {
 
     expect(text).toContain('End of book');
     expect(text).not.toContain('Call');
+  });
+});
+
+// ── Mirror sourcing: resolveTextUrl + no-format handling (issue #1) ───────────
+//
+// Text is sourced from the PG-sanctioned mirror (gutenberg.pglaf.org), never the
+// human-only main site. These tests pin that every resolved fetch URL targets the
+// mirror even when the Gutendex formats map carries the raw www.gutenberg.org URL,
+// and that formats with no compliant mirror path degrade to a clean no_text_format
+// error instead of falling back to the main site.
+
+describe('GutenbergTextService.resolveTextUrl — mirror sourcing', () => {
+  /** Real service pinned to the default PG mirror, for exercising URL resolution. */
+  function makeMirrorService(): GutenbergTextService {
+    return new (
+      GutenbergTextService as unknown as new (
+        _c: unknown,
+        _s: unknown,
+        _sc: unknown,
+      ) => GutenbergTextService
+    )(null, null, {
+      gutenbergTextBaseUrl: 'https://gutenberg.pglaf.org',
+      gutendexBaseUrl: 'https://gutendex.com/books/',
+    });
+  }
+
+  /** Access the private resolveTextUrl for direct URL-resolution assertions. */
+  function resolveTextUrl(
+    service: GutenbergTextService,
+    book: Book,
+    id: number,
+  ): { url: string; format: string } | null {
+    return (
+      service as unknown as {
+        resolveTextUrl: (b: Book, i: number) => { url: string; format: string } | null;
+      }
+    ).resolveTextUrl(book, id);
+  }
+
+  it('resolves UTF-8 books to the mirror cache path, ignoring the raw www.gutenberg.org formats URL', () => {
+    // The formats map carries the real Gutendex URL (main site); resolution must ignore it.
+    const book: Book = {
+      ...textBook,
+      formats: { 'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/84.txt.utf-8' },
+    };
+    const resolved = resolveTextUrl(makeMirrorService(), book, 84);
+
+    expect(resolved?.url).toBe('https://gutenberg.pglaf.org/cache/epub/84/pg84.txt');
+    expect(resolved?.format).toBe('text/plain; charset=utf-8');
+    expect(resolved?.url).not.toContain('www.gutenberg.org');
+  });
+
+  it('falls back to the mirror HTML cache path when only HTML is available', () => {
+    const book: Book = {
+      ...textBook,
+      formats: {
+        'text/html': 'https://www.gutenberg.org/ebooks/116.html.images',
+        'text/plain; charset=us-ascii': 'https://www.gutenberg.org/files/116/116-0.txt',
+      },
+    };
+    const resolved = resolveTextUrl(makeMirrorService(), book, 116);
+
+    expect(resolved?.url).toBe('https://gutenberg.pglaf.org/cache/epub/116/pg116-images.html');
+    expect(resolved?.format).toBe('text/html');
+    expect(resolved?.url).not.toContain('www.gutenberg.org');
+  });
+
+  it('returns null for us-ascii-only books (no compliant mirror path)', () => {
+    const book: Book = {
+      ...textBook,
+      formats: { 'text/plain; charset=us-ascii': 'https://www.gutenberg.org/files/52/52.txt' },
+    };
+    expect(resolveTextUrl(makeMirrorService(), book, 52)).toBeNull();
+  });
+
+  it('fetchAndCacheText throws no_text_format (NotFound) for a us-ascii-only book without fetching', async () => {
+    const service = makeMirrorService();
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const usAsciiOnly: Book = {
+      ...textBook,
+      formats: { 'text/plain; charset=us-ascii': 'https://www.gutenberg.org/files/52/52.txt' },
+    };
+
+    const err = await service.fetchAndCacheText(usAsciiOnly, 52, ctx).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+    expect((err as McpError).data).toMatchObject({ reason: 'no_text_format' });
   });
 });

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -59,7 +59,7 @@ Fetch complete metadata for a single Project Gutenberg book.
 
 - Returns the full formats map (MIME type → download URL) including plain text, HTML, EPUB, and cover image
 - Includes translators and editors alongside authors, each with birth/death years
-- `has_plain_text` flag confirms whether a UTF-8 or ASCII plain-text format is available
+- `has_plain_text` flag confirms whether a UTF-8 plain-text format is available
 - `media_type` distinguishes readable text books from audio recordings
 - Use this before `gutenberg_get_text` to confirm text availability and inspect the formats map
 
@@ -73,7 +73,7 @@ Retrieve the plain-text content of a Project Gutenberg book, stripped of license
 - Offset/limit chunking for long works: novels routinely run 500 KB–2 MB; read in manageable chunks without loading the whole file
 - Response includes `totalChars`, `offset`, `length`, and `remainingChars` for precise pagination
 - Paragraph-boundary trimming: actual returned length may be slightly less than `limit` — use `length` (not `limit`) to compute the next offset
-- Prefers UTF-8 plain text; falls back to ASCII plain text; converts HTML as a last resort
+- Prefers UTF-8 plain text; falls back to an HTML edition converted to text
 - Refuses audio books (`media_type "Sound"`) with a clear recovery hint
 - `provenance` field carries the Gutenberg ID, title, and license URL for attribution
 
@@ -104,7 +104,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 Project Gutenberg integration:
 
 - Catalog search and metadata via [Gutendex](https://gutendex.com/) — an unofficial but stable JSON API over the Gutenberg dataset
-- Full plain-text retrieval directly from Project Gutenberg file servers with transparent UTF-8/ASCII/HTML fallback chain
+- Full plain-text retrieval from a Project Gutenberg content mirror (permits automated access) with transparent UTF-8/HTML fallback
 - In-session text caching: book text is fetched once per session and served from cache for subsequent chunk reads
 - No API key required — Project Gutenberg data is freely available; no registration needed
 
@@ -113,7 +113,7 @@ Agent-friendly output:
 - `has_plain_text` flag on every search/browse result so agents can pre-filter before attempting text retrieval
 - Precise chunking contract: `offset`, `length`, `totalChars`, `remainingChars`, `hasMore` on every `gutenberg_get_text` response for reliable sequential reads
 - `provenance` field on every text response for attribution
-- Discriminated `sourceFormat` field (`text/plain; charset=utf-8`, `text/plain; charset=us-ascii`, `text/html`) so agents know the fidelity of the text
+- Discriminated `sourceFormat` field (`text/plain; charset=utf-8`, `text/html`) so agents know the fidelity of the text
 
 ---
 
@@ -236,7 +236,7 @@ cp .env.example .env
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `GUTENDEX_BASE_URL` | Base URL for the Gutendex catalog API. Override for self-hosted instances. | `https://gutendex.com/books/` |
-| `GUTENBERG_TEXT_BASE_URL` | Base URL for Project Gutenberg file servers. Override for mirrors. | `https://www.gutenberg.org` |
+| `GUTENBERG_TEXT_BASE_URL` | Base URL for a Project Gutenberg content mirror serving the `/cache/epub` file tree. Override to use a different mirror. | `https://gutenberg.pglaf.org` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |

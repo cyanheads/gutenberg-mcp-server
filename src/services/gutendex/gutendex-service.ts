@@ -57,11 +57,17 @@ function normalizePerson(p: RawPerson) {
   };
 }
 
-function hasPlainText(book: RawBook): boolean {
+/**
+ * Whether gutenberg_get_text can serve this book as plain text: media_type
+ * "Text" with a UTF-8 text/plain format present. US-ASCII-only entries are
+ * excluded — they have no path on the sanctioned mirror and resolve to
+ * no_text_format — so the flag never advertises text the reader tool can't
+ * deliver. (HTML-fallback-only books are likewise not counted here; the flag
+ * tracks plain-text availability, not HTML-derived readability.)
+ */
+export function hasPlainText(book: RawBook): boolean {
   if (book.media_type !== 'Text') return false;
-  return (
-    'text/plain; charset=utf-8' in book.formats || 'text/plain; charset=us-ascii' in book.formats
-  );
+  return 'text/plain; charset=utf-8' in book.formats;
 }
 
 function normalizeBook(raw: RawBook): Book {

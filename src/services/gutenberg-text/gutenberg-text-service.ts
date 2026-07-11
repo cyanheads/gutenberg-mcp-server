@@ -8,7 +8,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -67,10 +67,10 @@ function htmlToText(html: string): string {
 }
 
 /**
- * Rewrite a UTF-8 format URL to the direct HTTPS cache path, avoiding the
- * HTTPS→HTTP redirect that modern runtimes refuse to follow.
- * Input:  https://www.gutenberg.org/ebooks/1342.txt.utf-8
- * Output: https://www.gutenberg.org/cache/epub/1342/pg1342.txt
+ * Build the direct HTTPS cache-path URL for a book's generated UTF-8 plain text
+ * on the configured mirror. Derived from the book id — never from the upstream
+ * Gutendex format URL — so no main-site (www.gutenberg.org) URL is ever fetched.
+ * Example (base https://gutenberg.pglaf.org): .../cache/epub/1342/pg1342.txt
  */
 function rewriteToHttpsCachePath(id: number, baseUrl: string): string {
   const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
@@ -78,24 +78,14 @@ function rewriteToHttpsCachePath(id: number, baseUrl: string): string {
 }
 
 /**
- * Ensure a URL uses HTTPS; resolve relative URLs against baseUrl.
- * Validates that the resulting URL's host matches the expected base host —
- * guards against SSRF when format URLs come from upstream API responses.
+ * Build the direct HTTPS cache-path URL for a book's generated HTML on the
+ * configured mirror — the fallback when no UTF-8 plain text is available.
+ * Id-derived like the plain-text path, so no upstream URL is fetched.
+ * Example (base https://gutenberg.pglaf.org): .../cache/epub/1342/pg1342-images.html
  */
-function toHttps(rawUrl: string, baseUrl: string): string {
-  const absolute = rawUrl.startsWith('http')
-    ? rawUrl.replace(/^http:\/\//, 'https://')
-    : `${baseUrl}${rawUrl}`;
-
-  const expectedHost = new URL(baseUrl).host;
-  const actualHost = new URL(absolute).host;
-  if (actualHost !== expectedHost) {
-    throw new Error(
-      `Upstream format URL host "${actualHost}" does not match expected Gutenberg host "${expectedHost}" — refusing fetch.`,
-    );
-  }
-
-  return absolute;
+function rewriteToHttpsHtmlCachePath(id: number, baseUrl: string): string {
+  const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  return `${base}/cache/epub/${id}/pg${id}-images.html`;
 }
 
 export class GutenbergTextService {
@@ -113,31 +103,35 @@ export class GutenbergTextService {
   private resolveTextUrl(book: Book, id: number): { url: string; format: SourceFormat } | null {
     const fmt = book.formats;
 
+    // Primary: the mirror's generated UTF-8 plain text — a host swap of the
+    // cache path, covering essentially every modern text book.
     if ('text/plain; charset=utf-8' in fmt) {
-      // Rewrite to direct HTTPS cache path (avoids HTTPS→HTTP redirect)
       return {
         url: rewriteToHttpsCachePath(id, this.textBaseUrl),
         format: 'text/plain; charset=utf-8',
       };
     }
 
-    if ('text/plain; charset=us-ascii' in fmt) {
-      // Direct URL from formats map — served over HTTPS without redirect
+    // Fallback: the mirror's generated HTML, converted to text downstream.
+    if ('text/html' in fmt) {
       return {
-        url: toHttps(fmt['text/plain; charset=us-ascii'], this.textBaseUrl),
-        format: 'text/plain; charset=us-ascii',
+        url: rewriteToHttpsHtmlCachePath(id, this.textBaseUrl),
+        format: 'text/html',
       };
     }
 
-    if ('text/html' in fmt) {
-      return { url: toHttps(fmt['text/html'], this.textBaseUrl), format: 'text/html' };
-    }
-
+    // No mirror-served text path — notably us-ascii-only books, whose upstream
+    // us-ascii URL points at the main site (never fetched) and for which the
+    // mirror exposes no stable plain-text filename. Surface a clean no-format
+    // error rather than fetch www.gutenberg.org.
     return null;
   }
 
-  /** Fetch the raw text for a book, given a URL and format. */
-  private fetchRaw(url: string, format: SourceFormat, ctx: Context): Promise<string> {
+  /**
+   * Fetch the raw bytes for a book URL and decode as UTF-8. The mirror serves
+   * generated UTF-8 for both the plain-text and HTML cache files.
+   */
+  private fetchRaw(url: string, ctx: Context): Promise<string> {
     return withRetry(
       async () => {
         const reqCtx = requestContextService.createRequestContext({
@@ -148,10 +142,6 @@ export class GutenbergTextService {
           signal: ctx.signal,
         });
         const buffer = await response.arrayBuffer();
-
-        if (format === 'text/plain; charset=us-ascii') {
-          return new TextDecoder('windows-1252').decode(buffer);
-        }
         return new TextDecoder('utf-8').decode(buffer);
       },
       {
@@ -208,7 +198,7 @@ export class GutenbergTextService {
 
     const resolved = this.resolveTextUrl(book, id);
     if (!resolved) {
-      throw serviceUnavailable(`Book ${id} has no readable text format.`, {
+      throw notFound(`Book ${id} has no mirror-served plain-text or HTML format.`, {
         reason: 'no_text_format',
       });
     }
@@ -217,7 +207,7 @@ export class GutenbergTextService {
 
     let raw: string;
     try {
-      raw = await this.fetchRaw(resolved.url, resolved.format, ctx);
+      raw = await this.fetchRaw(resolved.url, ctx);
     } catch (err: unknown) {
       const e = err as { code?: number; message?: string };
       // Re-wrap as text_fetch_failed so the tool contract matches

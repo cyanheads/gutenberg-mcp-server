@@ -69,7 +69,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
             has_plain_text: z
               .boolean()
               .describe(
-                'True if media_type is "Text" AND a text/plain format is available via gutenberg_get_text.',
+                'True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.',
               ),
           })
           .describe('Book entry.'),

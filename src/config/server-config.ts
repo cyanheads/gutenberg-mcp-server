@@ -16,8 +16,10 @@ const ServerConfigSchema = z.object({
   gutenbergTextBaseUrl: z
     .string()
     .url()
-    .default('https://www.gutenberg.org')
-    .describe('Base URL for Project Gutenberg file servers. Override for mirrors.'),
+    .default('https://gutenberg.pglaf.org')
+    .describe(
+      'Base URL for a Project Gutenberg content mirror serving the /cache/epub file tree. Defaults to gutenberg.pglaf.org, a mirror that permits automated access. Override to use a different mirror.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;

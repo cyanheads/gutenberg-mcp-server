@@ -1,6 +1,6 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-07-11 16:41:44
+Generated on: 2026-07-11 20:25:07
 
 ```text
 gutenberg-mcp-server/
@@ -152,6 +152,9 @@ gutenberg-mcp-server/
 ├── tests/
 │   ├── prompts/
 │   ├── resources/
+│   ├── services/
+│   │   └── gutendex/
+│   │       └── gutendex-service.test.ts
 │   └── tools/
 │       ├── gutenberg-browse-popular.tool.test.ts
 │       ├── gutenberg-get-book.tool.test.ts

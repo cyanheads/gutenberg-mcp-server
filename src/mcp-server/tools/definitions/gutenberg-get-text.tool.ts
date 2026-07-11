@@ -17,7 +17,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     '— novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than ' +
     'fetching the whole book at once. The response reports totalChars and remainingChars so ' +
     'the caller can page through without guessing. Prefers UTF-8 plain text; falls back to ' +
-    'ASCII plain text; refuses audio books (media_type "Sound") with a clear error.',
+    'an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -100,9 +100,9 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'no_text_format',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The book record exists but has no plain-text or HTML format in its formats map.',
+      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an older ASCII-only entry).',
       recovery:
-        'Call gutenberg_get_book to inspect the available formats. The book may only be available as EPUB or other formats that this server does not convert.',
+        'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, ASCII-only, or other formats this server cannot read as text.',
     },
     {
       reason: 'offset_out_of_range',
@@ -145,15 +145,16 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       );
     }
 
-    // Guard: ensure at least one readable format exists
-    const hasText =
-      'text/plain; charset=utf-8' in book.formats ||
-      'text/plain; charset=us-ascii' in book.formats ||
-      'text/html' in book.formats;
+    // Guard: ensure at least one mirror-servable format exists. Mirrors
+    // resolveTextUrl's own preference (utf-8, then html) — us-ascii has no
+    // compliant mirror path, so it's intentionally excluded here too. This
+    // lets an ASCII-only book fail fast with a full recovery hint instead of
+    // falling through to the service's bare no_text_format throw.
+    const hasText = 'text/plain; charset=utf-8' in book.formats || 'text/html' in book.formats;
     if (!hasText) {
       throw ctx.fail(
         'no_text_format',
-        `Book ${input.id} has no plain-text or HTML format available.`,
+        `Book ${input.id} has no UTF-8 plain-text or HTML format available.`,
         { ...ctx.recoveryFor('no_text_format') },
       );
     }

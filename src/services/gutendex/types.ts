@@ -49,7 +49,7 @@ export interface Book {
   download_count: number;
   editors: Person[];
   formats: Record<string, string>;
-  /** True when media_type is "Text" and a text/plain format is available. */
+  /** True when media_type is "Text" and a UTF-8 text/plain format is available. */
   has_plain_text: boolean;
   id: number;
   languages: string[];

@@ -34,14 +34,15 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 - No authentication — Gutendex is fully public and keyless
 - Gutendex base URL: `https://gutendex.com/books/` (the `/books` path redirects 301 → `/books/`; implementation must use trailing slash or follow redirects)
 - Catalog returns up to 32 results per page; `next` and `previous` are full URLs, not cursor tokens
-- Plain-text files served from `https://www.gutenberg.org/`; two URL patterns exist depending on the format key:
-  - `text/plain; charset=utf-8` format URLs use `/ebooks/N.txt.utf-8`, which issues an HTTP 302 to `http://www.gutenberg.org/cache/epub/N/pgN.txt` (HTTP, not HTTPS). Modern runtimes (Node.js undici, native fetch) do not follow HTTPS→HTTP redirects by default. **Implementation must rewrite the URL directly to `https://www.gutenberg.org/cache/epub/N/pgN.txt` — same host, same path, HTTPS — rather than following the redirect.**
-  - `text/plain; charset=us-ascii` format URLs use `/files/N/N-0.txt` directly (no redirect; HTTPS 200)
-- UTF-8 files begin with a UTF-8 BOM (`\xEF\xBB\xBF`) — strip it. US-ASCII files do not have a BOM.
-- UTF-8 files have `[header block] *** START OF ... *** [content] *** END OF ... *** [license footer]` structure. US-ASCII files (older catalog entries) start directly with `*** START OF ... ***` — no preceding header block. Both formats use the same `*** START/END ***` regex for extraction.
-- Both file types use CRLF (`\r\n`) line endings throughout. The CRLF normalization step (step 6) handles this.
-- Strip everything outside the `*** START ***` / `*** END ***` markers; keep a one-line provenance note in response metadata
-- Prefer `text/plain; charset=utf-8` from the formats map; fall back to `text/plain; charset=us-ascii`; fall back to HTML→text when no plain-text format exists
+- Plain-text files are served from a Project Gutenberg content mirror (default `https://gutenberg.pglaf.org`, overridable via `GUTENBERG_TEXT_BASE_URL`) — never from the main site (`www.gutenberg.org`), whose Terms of Use prohibit automated access. Fetch URLs are built from the book ID, never from Gutendex's raw format URLs (which point at the main site):
+  - `text/plain; charset=utf-8` → `/cache/epub/N/pgN.txt` on the mirror (same cache-path shape the main site uses; only the host changes)
+  - `text/html` (fallback, when no UTF-8 format exists) → `/cache/epub/N/pgN-images.html` on the mirror
+  - `text/plain; charset=us-ascii` has no compliant mirror path — these books resolve to `no_text_format` rather than ever fetching the main site
+- UTF-8 files begin with a UTF-8 BOM (`\xEF\xBB\xBF`) — strip it.
+- Files have `[header block] *** START OF ... *** [content] *** END OF ... *** [license footer]` structure; the regex-based extraction also tolerates files with no preceding header block (older catalog entries).
+- Files use CRLF (`\r\n`) line endings throughout. The CRLF normalization step (step 6) handles this.
+- Strip everything outside the `*** START ***` / `*** END ***` markers; keep a one-line provenance note in response metadata (the provenance citation still links to `www.gutenberg.org` — a human-facing reference, never fetched)
+- Prefer `text/plain; charset=utf-8` from the formats map; fall back to `text/html` when no UTF-8 format exists; return `no_text_format` when neither is available
 - Audio books (`media_type === "Sound"`) have no literary plain text — they may have a `text/plain` format in their formats map, but it is a readme/index file for the audio recording, not the literary work. Return a clear error for any `media_type === "Sound"` book regardless of format availability.
 - Normalize all fetched text to UTF-8 before serving
 - No rate-limit headers observed on Gutendex; apply conservative client-side throttling (e.g., 4 concurrent requests max)
@@ -54,7 +55,7 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
 | `GutendexService` | Gutendex catalog API (`gutendex.com/books/`) | `gutenberg_search_books`, `gutenberg_get_book`, `gutenberg_browse_popular` |
-| `GutenbergTextService` | Project Gutenberg plain-text file servers (`www.gutenberg.org`) | `gutenberg_get_text` |
+| `GutenbergTextService` | Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) | `gutenberg_get_text` |
 
 Both services are thin HTTP clients with retry, timeout, and response-parse logic. No shared state beyond an optional in-process response cache.
 
@@ -65,7 +66,7 @@ Both services are thin HTTP clients with retry, timeout, and response-parse logi
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
 | `GUTENDEX_BASE_URL` | No | Override Gutendex base URL (default: `https://gutendex.com/books/`). Gutendex is self-hostable — useful for private instances. |
-| `GUTENBERG_TEXT_BASE_URL` | No | Override Gutenberg content base URL (default: `https://www.gutenberg.org`). For mirrors or caching proxies. |
+| `GUTENBERG_TEXT_BASE_URL` | No | Override the Project Gutenberg content mirror (default: `https://gutenberg.pglaf.org`, a mirror that permits automated access — see Design Decisions). |
 
 No API keys. Both overrides exist to support self-hosted Gutendex instances and Gutenberg mirrors, which the project explicitly encourages.
 
@@ -129,7 +130,7 @@ tool('gutenberg_search_books', {
       languages: z.array(z.string()).describe('Two-character language codes for this edition.'),
       subjects: z.array(z.string()).describe('Library of Congress subject headings for the work.'),
       download_count: z.number().describe('Total downloads from Project Gutenberg — a real popularity signal reflecting actual reader interest.'),
-      has_plain_text: z.boolean().describe('True if the book has media_type "Text" AND a text/plain format available — both conditions required as audio books (media_type "Sound") can also have text/plain entries that are readme files, not literary content. Use this as the prerequisite check for gutenberg_get_text.'),
+      has_plain_text: z.boolean().describe('True if the book has media_type "Text" AND a UTF-8 text/plain format available — both conditions required as audio books (media_type "Sound") can also have text/plain entries that are readme files, not literary content. Use this as the prerequisite check for gutenberg_get_text.'),
     })).describe('Matching books, ordered by the sort parameter.'),
     totalCount: z.number().describe('Total number of books matching the query across all pages.'),
     page: z.number().describe('Current page number.'),
@@ -205,7 +206,7 @@ tool('gutenberg_get_book', {
     download_count: z.number().describe('Total downloads — popularity signal.'),
     summary: z.string().nullable().describe('Auto-generated summary of the work, when available. Absent on many older records.'),
     formats: z.record(z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
-    has_plain_text: z.boolean().describe('True if media_type is "Text" AND a text/plain format (UTF-8 or ASCII) is present in formats — prerequisite for gutenberg_get_text. Audio books (media_type "Sound") may have text/plain entries that are readme files; they return false here.'),
+    has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format ("text/plain; charset=utf-8") is present in formats — prerequisite for gutenberg_get_text. Audio books (media_type "Sound") may have text/plain entries that are readme files; they return false here.'),
   }),
 
   errors: [
@@ -228,14 +229,14 @@ tool('gutenberg_get_book', {
 **Purpose:** Retrieve the literary content of a book as plain text, stripped of the Gutenberg license boilerplate, with offset/limit chunking for context-budget management.
 
 **Upstream calls:**
-1. `GET https://gutendex.com/books/{id}/` — resolve the `text/plain; charset=utf-8` (or fallback) URL from the formats map
-2. `GET https://www.gutenberg.org/cache/epub/{id}/pg{id}.txt` — fetch the full plain-text file. For UTF-8 format: the formats map URL (`/ebooks/N.txt.utf-8`) redirects via HTTP 302 to an HTTP URL; instead, rewrite directly to the HTTPS `/cache/epub/N/pgN.txt` path. For US-ASCII format: use the `/files/N/N-0.txt` URL from the formats map directly (no redirect).
+1. `GET https://gutendex.com/books/{id}/` — resolve which format (`text/plain; charset=utf-8` or `text/html`) the book has, from the formats map
+2. `GET https://gutenberg.pglaf.org/cache/epub/{id}/pg{id}.txt` (or `pg{id}-images.html` for the HTML fallback) — fetch the full file from the configured Project Gutenberg content mirror. The URL is built directly from the book ID, never from Gutendex's raw format URL — the formats map's URLs point at the main site (`www.gutenberg.org`), which the fetch path must never touch (see Design Decisions).
 
 **This is the core design challenge.** Full notes in the Design Decisions section below.
 
 ```ts
 tool('gutenberg_get_text', {
-  description: 'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard license header and footer so the response contains only the literary work. For long works — novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than fetching the whole book at once. The response reports totalChars and remainingChars so the caller can page through without guessing. Prefers UTF-8 plain text; falls back to ASCII plain text; refuses audio books (media_type "Sound") with a clear error.',
+  description: 'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard license header and footer so the response contains only the literary work. For long works — novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than fetching the whole book at once. The response reports totalChars and remainingChars so the caller can page through without guessing. Prefers UTF-8 plain text; falls back to an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -277,8 +278,8 @@ tool('gutenberg_get_text', {
     {
       reason: 'no_text_format',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The book record exists but has no plain-text or HTML format in its formats map — rare for very old or incomplete entries.',
-      recovery: 'Call gutenberg_get_book to inspect the available formats. The book may only be available as EPUB or other formats that this server does not convert.',
+      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an older ASCII-only entry).',
+      recovery: 'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, ASCII-only, or other formats this server cannot read as text.',
     },
     {
       reason: 'offset_out_of_range',
@@ -332,7 +333,7 @@ tool('gutenberg_browse_popular', {
       })).describe('Author(s).'),
       languages: z.array(z.string()).describe('Language codes.'),
       download_count: z.number().describe('Total downloads — the basis for the popularity ranking.'),
-      has_plain_text: z.boolean().describe('True if media_type is "Text" AND a text/plain format is available via gutenberg_get_text.'),
+      has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.'),
     })).describe('Top books by download count, most popular first.'),
     totalInCatalog: z.number().describe('Total books matching the filter in the full catalog (useful for context — "top 20 of 60,000").'),
   }),
@@ -359,16 +360,17 @@ This section specifies `gutenberg_get_text`'s text-processing pipeline. It is th
 ### Pipeline
 
 ```
-1. Resolve format URL         — from formats map: prefer "text/plain; charset=utf-8",
-                                fall back to "text/plain; charset=us-ascii",
-                                fall back to "text/html"
-2. Fetch file                 — for utf-8 format: rewrite URL to
-                                https://www.gutenberg.org/cache/epub/N/pgN.txt
-                                (avoids HTTPS→HTTP redirect that modern runtimes reject);
-                                for us-ascii format: fetch /files/N/N-0.txt directly;
+1. Resolve format             — from formats map: prefer "text/plain; charset=utf-8",
+                                fall back to "text/html"; us-ascii-only books have no
+                                compliant mirror path and go straight to no_text_format
+2. Fetch file                  — URL is built from the book ID against the configured PG
+                                mirror (default gutenberg.pglaf.org), never from Gutendex's
+                                raw format URL: .../cache/epub/N/pgN.txt for utf-8,
+                                .../cache/epub/N/pgN-images.html for the html fallback;
                                 30s timeout
 3. Strip BOM                  — remove leading \xEF\xBB\xBF if present (utf-8 files only)
-4. Normalize encoding         — if fetched as us-ascii, re-encode to UTF-8 via TextDecoder
+4. Decode as UTF-8             — the mirror serves generated UTF-8 bytes for both the
+                                plain-text and HTML cache files; no per-format decode branch
 5. Extract literary content   — find "*** START OF THE PROJECT GUTENBERG EBOOK … ***"
                                 and "*** END OF THE PROJECT GUTENBERG EBOOK … ***";
                                 extract everything between them (exclusive);
@@ -387,7 +389,7 @@ This section specifies `gutenberg_get_text`'s text-processing pipeline. It is th
 
 ### Boilerplate boundaries (verified live)
 
-The `*** START ***` marker appears at line 27 for Pride and Prejudice (UTF-8 files), but line number varies. US-ASCII files (older entries) start at line 1 with the `*** START ***` marker — no preceding header block. The regex handles both:
+The `*** START ***` marker appears at line 27 for Pride and Prejudice (UTF-8 files), but line number varies. Older-style files (e.g. the US-ASCII editions this server no longer fetches — see Design Decisions) start at line 1 with the `*** START ***` marker, no preceding header block. The regex handles both, so it stays tolerant of that layout wherever it shows up (e.g. inside an HTML-fallback source):
 
 ```
 /^\*{3} START OF THE PROJECT GUTENBERG EBOOK .+? \*{3}$/m
@@ -408,8 +410,8 @@ Full-text files are static for months or years. Cache the extracted (stripped, n
 
 ### HTML fallback
 
-A small minority of books lack a `text/plain` format and only have `text/html`. In this case:
-- Fetch the `text/html` URL
+A small minority of books lack a `text/plain; charset=utf-8` format and only have `text/html`. In this case:
+- Fetch the mirror's `/cache/epub/N/pgN-images.html` (ID-derived, like the plain-text path — never Gutendex's raw `text/html` format URL, which points at the main site)
 - Strip HTML tags (a regex or a lightweight parser — `node-html-markdown` or similar)
 - Decode HTML entities
 - Preserve `<p>`, `<br>`, `<h1>`–`<h6>`, `<hr>` as paragraph/heading breaks
@@ -456,14 +458,14 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **`gutenberg_get_book` is a separate tool from `search_books`** | The full formats map (needed before `get_text`) is not returned by search — agents need a dedicated lookup step after finding a candidate. Also allows direct ID-based access without a search round-trip when the ID is already known. |
 | **Offset/limit chunking over streaming or pagination tokens** | Offset/limit is stateless (no server-side cursor), stable (same offset always returns same content), and safe for retry. Cursor-based pagination requires server-side state and complicates partial retries. Streaming is not supported by the MCP transport. |
 | **Soft paragraph-boundary trimming on limit** | Cutting at exactly N characters mid-sentence degrades the LLM's context. A 500-character backtrack to the nearest paragraph break adds negligible overhead and produces much cleaner chunks. |
-| **Prefer `text/plain; charset=utf-8` > `text/plain; charset=us-ascii` > `text/html`** | UTF-8 is the canonical modern encoding; the ASCII fallback handles a large swath of older entries. HTML fallback is lossy but preferable to an outright error when no plain text exists. |
+| **Prefer `text/plain; charset=utf-8` > `text/html`; no `text/plain; charset=us-ascii` fallback** | UTF-8 is the canonical modern encoding. US-ASCII-only entries (older catalog uploads) have no path on the PG-sanctioned mirror this server sources from — serving them would mean fetching the human-only main site (`www.gutenberg.org`), which its Terms of Use prohibit for automated access. Those books cleanly return `no_text_format` instead. HTML fallback is lossy but preferable to an outright error when no plain text exists. |
 | **Strip boilerplate via `*** START ***/*** END ***` markers (regex, not line-number heuristic)** | Line numbers vary per file (verified: P&P has START at line 27). The markers are the canonical, stable boundary. Regex is robust to line-number drift. |
 | **Cache stripped text, not raw file bytes** | The post-extraction text is what every request re-uses. Caching raw bytes wastes memory and requires re-running the extraction pipeline on every request. |
 | **24-hour text cache TTL, 1-hour catalog TTL** | Text files are effectively immutable (updated at most a few times a year). Catalog metadata changes more often (download counts, new additions). Different TTLs reflect actual update frequency. |
 | **No `author_year_start/end` in `browse_popular`** | `browse_popular` is a discovery shortcut, not a research tool. Year-range filtering on a popularity browse is a niche compound query that belongs in `search_books` where the fuller filter set is available. |
-| **`has_plain_text` computed field on search/browse results** | Saves agents an extra `get_book` call just to check format availability. Computed as `media_type === "Text" AND (formats has "text/plain; charset=utf-8" OR "text/plain; charset=us-ascii")`. The media_type guard is required: audio books (media_type "Sound") can have text/plain entries in their formats map, but those are readme/index files for the audio recording, not literary text. |
+| **`has_plain_text` computed field on search/browse results** | Saves agents an extra `get_book` call just to check format availability. Computed as `media_type === "Text" AND formats has "text/plain; charset=utf-8"`. The media_type guard is required: audio books (media_type "Sound") can have text/plain entries in their formats map, but those are readme/index files for the audio recording, not literary text. |
 | **`ids` as comma-separated query string value** | The Gutendex API accepts ids as a single comma-separated value (`ids=84,1342`), not as repeated URL parameters (`ids=84&ids=1342` only returns the last value). Other filters still apply when ids is set — a conflicting language filter reduces results. The Zod input is `z.array(z.number())` and the service layer joins with commas. |
-| **HTTPS→HTTP redirect on text file fetch** | The format URL for `text/plain; charset=utf-8` (`/ebooks/N.txt.utf-8`) redirects via HTTP 302 to `http://` (not `https://`). Modern Node.js runtimes do not follow HTTPS→HTTP redirects. Instead of following the redirect, rewrite the URL directly to the HTTPS cache path (`https://www.gutenberg.org/cache/epub/N/pgN.txt`). US-ASCII files (`/files/N/N-0.txt`) serve directly over HTTPS with no redirect. |
+| **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
 | **No `mime_type` filter parameter exposed** | The Gutendex `mime_type` filter exists but is low-value for agents: agents want "books with readable text" not "books with this exact MIME string". The `has_plain_text` computed field covers the practical need. |
 | **`copyright` filter not exposed** | All Gutenberg books are public domain or public-domain-in-USA (copyright: false). The `true` and `null` buckets are edge cases not relevant to the server's stated purpose. Exposing the filter would add noise for no agent benefit. |
 | **`summary` as nullable** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. Expose as a nullable string (first element of the array if present, null otherwise) to avoid forcing agents to handle the array structure. |
@@ -478,9 +480,10 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | Limitation | Detail |
 |:-----------|:-------|
 | **Text-only corpus** | Only books with `media_type: "Text"` are servable. Audio books (over 1,000 entries) are accessible as metadata but not readable text. |
+| **ASCII-only entries are unreadable** | Older catalog entries whose only plain-text format is `text/plain; charset=us-ascii` have no path on the PG-sanctioned mirror this server sources from — serving them would require fetching the human-only main site, which its Terms of Use prohibit. These return `no_text_format` rather than falling back to the main site. |
 | **No chapter-aware chunking** | Chapter boundaries in Gutenberg plain-text files are not consistently marked across the catalog (headings vary — "Chapter I", "CHAPTER 1", "Part First", etc.). The design uses paragraph-boundary chunking, which is reliable and consistent. True chapter detection would require per-book parsing heuristics and is deferred. |
 | **HTML fallback quality** | Books fetched via the HTML fallback may include formatting artifacts from markup conversion. The `sourceFormat` field signals this so agents can note the limitation. |
 | **Gutendex page size capped at 32** | The Gutendex API returns at most 32 results per page with no `page_size` parameter. Agents needing more results must call `gutenberg_search_books` multiple times with incrementing `page` values. |
 | **Very large books** | War and Peace is ~3MB of stripped text, over 150 20,000-character chunks. The in-process cache holds this fine, but complete ingestion by an agent would require many sequential calls. This is a corpus property, not a server limitation — the chunking design exists specifically to handle it. |
-| **Gutenberg file server latency** | The Project Gutenberg file servers (`www.gutenberg.org`) can be slow, especially for less-popular books whose files are not in the CDN cache. The 30-second fetch timeout and 24-hour text cache mitigate repeated latency. |
+| **Gutenberg mirror latency** | The configured Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) can be slow, especially for less-popular books whose files are not in its cache. The 30-second fetch timeout and 24-hour text cache mitigate repeated latency. |
 | **Gutendex API availability** | Gutendex is a community-run service. The `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |
