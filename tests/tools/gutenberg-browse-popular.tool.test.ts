@@ -198,6 +198,34 @@ describe('gutenbergBrowsePopular', () => {
     expect(result.books[0].authors).toEqual([]);
   });
 
+  describe('enrichmentTrailer', () => {
+    // The handler wires the enrichment data (covered by 'discloses truncation');
+    // these render functions are what turn it into readable content[] trailer
+    // text instead of a disconnected `**key:** value` dump. Testing them directly
+    // — unit tests call handler(), which bypasses the wrapper that assembles the
+    // trailer — the live field test covers the fully-assembled content[].
+    const trailer = gutenbergBrowsePopular.enrichmentTrailer;
+
+    it('renders each truncation field as a readable line', () => {
+      expect(trailer?.truncated?.render?.(true)).toContain('more matching books');
+      expect(trailer?.shown?.render?.(3)).toContain('3');
+      const capLine = trailer?.cap?.render?.(3);
+      expect(capLine).toContain('3');
+      expect(capLine).toContain('32');
+    });
+
+    it('renders truncationCeiling with the count and the gutenberg_search_books pointer', () => {
+      const line = trailer?.truncationCeiling?.render?.(103120);
+      expect(line).toContain('103,120');
+      expect(line).toContain('gutenberg_search_books');
+      expect(line).toContain('sort="popular"');
+    });
+
+    it('renders no truncationCeiling line when the value is absent', () => {
+      expect(trailer?.truncationCeiling?.render?.(undefined)).toBe('');
+    });
+  });
+
   describe('format()', () => {
     it('renders ranked list with rank number, title, authors, language, downloads, and text flag', () => {
       const output = {

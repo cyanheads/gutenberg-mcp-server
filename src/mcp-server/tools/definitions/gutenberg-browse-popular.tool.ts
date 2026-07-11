@@ -94,6 +94,31 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       ),
   },
 
+  // Presentation for the enrichment block's content[] trailer. Without these,
+  // the four scalar fields render as a disconnected `**key:** value` dump and the
+  // retrieval pointer (routed through the undeclared `notice` field) is stripped
+  // before it reaches content[]. Per-field renders compose a readable disclosure
+  // that content[]-only clients (e.g. Claude Desktop) see alongside format().
+  enrichmentTrailer: {
+    truncated: {
+      render: () => 'Truncated — the catalog holds more matching books than are shown here.',
+    },
+    shown: {
+      render: (value) => `Returned the top ${value} by download count.`,
+    },
+    cap: {
+      render: (value) => `Requested limit: ${value} (max 32 per call).`,
+    },
+    truncationCeiling: {
+      render: (value) =>
+        value === undefined
+          ? ''
+          : `The least-popular book shown has ${value.toLocaleString()} downloads; omitted books rank lower. ` +
+            'To page through the full result set, call gutenberg_search_books with the same language/topic ' +
+            'filters, sort="popular", and successive page values.',
+    },
+  },
+
   errors: [
     {
       reason: 'no_results',
