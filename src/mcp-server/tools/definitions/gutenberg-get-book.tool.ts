@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
 export const gutenbergGetBook = tool('gutenberg_get_book', {
@@ -117,7 +117,19 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
   async handler(input, ctx) {
     ctx.log.info('Fetching book metadata', { id: input.id });
 
-    const book = await getGutendexService().getBook(input.id, ctx);
+    const book = await getGutendexService()
+      .getBook(input.id, ctx)
+      .catch((err: unknown) => {
+        // The service throws a raw NotFound for a missing ID; re-throw through
+        // ctx.fail so the declared not_found recovery hint reaches both the
+        // content[] text and structuredContent.error.data.recovery.hint.
+        if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+          throw ctx.fail('not_found', `No book found with Gutenberg ID ${input.id}.`, {
+            ...ctx.recoveryFor('not_found'),
+          });
+        }
+        throw err;
+      });
 
     return {
       id: book.id,

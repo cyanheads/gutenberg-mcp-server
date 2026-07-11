@@ -94,16 +94,35 @@ describe('gutenbergGetBook', () => {
     expect(result.media_type).toBe('Sound');
   });
 
-  it('propagates NotFound when service throws for a nonexistent ID', async () => {
+  it('translates a service NotFound into ctx.fail("not_found") with recovery guidance', async () => {
     mockGutendexService.getBook.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.NotFound, 'Not found'),
+      new McpError(JsonRpcErrorCode.NotFound, 'No book found with Gutenberg ID 9999999.'),
     );
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
     const input = gutenbergGetBook.input.parse({ id: 9999999 });
 
+    // The service raises a bare NotFound; the handler must re-throw through
+    // ctx.fail so both data.reason and the declared recovery hint reach the client.
     await expect(gutenbergGetBook.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'not_found',
+        recovery: { hint: expect.stringContaining('gutenberg_search_books') },
+      },
     });
+  });
+
+  it('propagates non-NotFound service errors unchanged', async () => {
+    mockGutendexService.getBook.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Gutendex is unavailable'),
+    );
+    const ctx = createMockContext({ errors: gutenbergGetBook.errors });
+    const input = gutenbergGetBook.input.parse({ id: 1342 });
+
+    const err = await gutenbergGetBook.handler(input, ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect((err as McpError).data?.reason).toBeUndefined();
   });
 
   it('handles a translated work (translators populated)', async () => {
