@@ -21,11 +21,7 @@ await createApp({
   resources: [],
   prompts: [],
   instructions:
-    'Project Gutenberg MCP server. No API key required. ' +
-    'Typical workflow: gutenberg_search_books → gutenberg_get_book → gutenberg_get_text. ' +
-    'Use gutenberg_browse_popular for discovery. ' +
-    'gutenberg_get_text supports offset/limit chunking for long works — novels routinely exceed 500KB. ' +
-    'Only books with has_plain_text=true can be read with gutenberg_get_text.',
+    'Project Gutenberg MCP server. No API key required. Typical workflow: gutenberg_search_books → gutenberg_get_book → gutenberg_get_text. Use gutenberg_browse_popular for discovery. gutenberg_get_text supports offset/limit chunking for long works — novels routinely exceed 500KB. Only books with has_plain_text=true can be read with gutenberg_get_text.',
   setup(core) {
     const serverConfig = getServerConfig();
     initGutendexService(core.config, core.storage, serverConfig);

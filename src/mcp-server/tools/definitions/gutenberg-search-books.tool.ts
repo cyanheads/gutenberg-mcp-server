@@ -11,11 +11,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   title: 'Search Gutenberg Books',
   description:
-    'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and ' +
-    'author name with query words; filters by topic (subject or bookshelf keyword), language, ' +
-    'author lifespan, or a specific list of Gutenberg IDs. Results are ordered by popularity ' +
-    '(download count) by default. Returns book ID, title, authors, languages, subjects, and ' +
-    'download count — use gutenberg_get_book for the full formats map before fetching text.',
+    'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and author name with query words; filters by topic (subject or bookshelf keyword), language, author lifespan, or a specific list of Gutenberg IDs. Results are ordered by popularity (download count) by default. Returns book ID, title, authors, languages, subjects, and download count — use gutenberg_get_book for the full formats map before fetching text.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

@@ -459,7 +459,7 @@ describe('gutenbergGetText — format()', () => {
 
   it('renders provenance, position summary, and text content', () => {
     const blocks = gutenbergGetText.format!(baseOutput);
-    expect(blocks[0].type).toBe('text');
+    expect(blocks[0]?.type).toBe('text');
     const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('Project Gutenberg eBook #84');

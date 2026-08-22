@@ -31,13 +31,13 @@ function urlCacheKey(prefix: string, url: string): string {
 /**
  * Gutendex answers a page beyond the result set with HTTP 404 +
  * `{"detail":"Invalid page."}`. `fetchWithTimeout` surfaces that body on
- * `McpError.data.responseBody`; key the page-out-of-range translation off that
+ * `McpError.data.body`; key the page-out-of-range translation off that
  * exact shape so genuinely-missing resources (any other 404) aren't
  * misclassified as an out-of-range page.
  */
 function isInvalidPageResponse(data: unknown): boolean {
   if (typeof data !== 'object' || data === null) return false;
-  const body = (data as { responseBody?: unknown }).responseBody;
+  const body = (data as { body?: unknown }).body;
   if (typeof body !== 'string') return false;
   try {
     return (JSON.parse(body) as { detail?: unknown }).detail === 'Invalid page.';
@@ -128,7 +128,7 @@ export class GutendexService {
     const page = await withRetry(
       async () => {
         const reqCtx = requestContextService.createRequestContext({
-          parentContext: ctx as unknown as Record<string, unknown>,
+          parentContext: ctx,
           operation: 'GutendexService.fetchPage',
         });
         // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
@@ -139,6 +139,7 @@ export class GutendexService {
         const response = await fetchWithTimeout(url, CATALOG_TIMEOUT_MS, reqCtx, {
           signal: ctx.signal,
           headers: { Accept: 'application/json' },
+          expectedStatuses: [404],
         }).catch((err: unknown) => {
           if (
             err instanceof McpError &&
@@ -200,7 +201,7 @@ export class GutendexService {
     const raw = await withRetry(
       async () => {
         const reqCtx = requestContextService.createRequestContext({
-          parentContext: ctx as unknown as Record<string, unknown>,
+          parentContext: ctx,
           operation: 'GutendexService.getBook',
         });
         // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
@@ -208,6 +209,7 @@ export class GutendexService {
         const response = await fetchWithTimeout(url, CATALOG_TIMEOUT_MS, reqCtx, {
           signal: ctx.signal,
           headers: { Accept: 'application/json' },
+          expectedStatuses: [404],
         }).catch((err: unknown) => {
           if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
             throw notFound(`No book found with Gutenberg ID ${id}.`, { reason: 'not_found' });

@@ -53,7 +53,7 @@ describe('gutenbergBrowsePopular', () => {
     const result = await gutenbergBrowsePopular.handler(input, ctx);
 
     expect(result.books).toHaveLength(5);
-    expect(result.books[0].id).toBe(1);
+    expect(result.books[0]?.id).toBe(1);
     expect(result.totalInCatalog).toBe(65000);
   });
 
@@ -195,7 +195,7 @@ describe('gutenbergBrowsePopular', () => {
     const input = gutenbergBrowsePopular.input.parse({});
     const result = await gutenbergBrowsePopular.handler(input, ctx);
 
-    expect(result.books[0].authors).toEqual([]);
+    expect(result.books[0]?.authors).toEqual([]);
   });
 
   describe('enrichmentTrailer', () => {
@@ -250,7 +250,7 @@ describe('gutenbergBrowsePopular', () => {
         totalInCatalog: 65000,
       };
       const blocks = gutenbergBrowsePopular.format!(output);
-      expect(blocks[0].type).toBe('text');
+      expect(blocks[0]?.type).toBe('text');
       const text = (blocks[0] as { text: string }).text;
 
       expect(text).toContain('1.');

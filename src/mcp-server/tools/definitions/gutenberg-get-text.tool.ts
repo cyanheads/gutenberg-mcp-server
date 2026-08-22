@@ -12,12 +12,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergGetText = tool('gutenberg_get_text', {
   title: 'Get Gutenberg Book Text',
   description:
-    'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard ' +
-    'license header and footer so the response contains only the literary work. For long works ' +
-    '— novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than ' +
-    'fetching the whole book at once. The response reports totalChars and remainingChars so ' +
-    'the caller can page through without guessing. Prefers UTF-8 plain text; falls back to ' +
-    'an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
+    'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard license header and footer so the response contains only the literary work. For long works — novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than fetching the whole book at once. The response reports totalChars and remainingChars for reliable pagination. Prefers UTF-8 plain text; falls back to an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

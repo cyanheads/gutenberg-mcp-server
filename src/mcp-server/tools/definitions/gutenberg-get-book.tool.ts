@@ -11,11 +11,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergGetBook = tool('gutenberg_get_book', {
   title: 'Get Gutenberg Book',
   description:
-    'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with ' +
-    'birth/death years), translators, editors, subjects, bookshelves, languages, copyright ' +
-    'status, and the full formats map with download URLs for each available format (plain text, ' +
-    'HTML, EPUB, cover image, etc.). Use this before gutenberg_get_text to confirm a plain-text ' +
-    'format is available and to get the direct download URL.',
+    'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with birth/death years), translators, editors, subjects, bookshelves, languages, copyright status, and the full formats map with download URLs for each available format (plain text, HTML, EPUB, cover image, etc.). Use this before gutenberg_get_text to confirm a plain-text format is available and to get the direct download URL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

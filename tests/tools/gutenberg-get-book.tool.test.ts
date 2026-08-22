@@ -52,7 +52,7 @@ describe('gutenbergGetBook', () => {
     expect(result.id).toBe(1342);
     expect(result.title).toBe('Pride and Prejudice');
     expect(result.authors).toHaveLength(1);
-    expect(result.authors[0].name).toBe('Austen, Jane');
+    expect(result.authors[0]?.name).toBe('Austen, Jane');
     expect(result.translators).toEqual([]);
     expect(result.editors).toEqual([]);
     expect(result.languages).toEqual(['en']);
@@ -119,7 +119,9 @@ describe('gutenbergGetBook', () => {
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
     const input = gutenbergGetBook.input.parse({ id: 1342 });
 
-    const err = await gutenbergGetBook.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(gutenbergGetBook.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
     expect(err).toBeInstanceOf(McpError);
     expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect((err as McpError).data?.reason).toBeUndefined();
@@ -139,7 +141,7 @@ describe('gutenbergGetBook', () => {
     const result = await gutenbergGetBook.handler(input, ctx);
 
     expect(result.translators).toHaveLength(1);
-    expect(result.translators[0].name).toBe('Maude, Aylmer');
+    expect(result.translators[0]?.name).toBe('Maude, Aylmer');
   });
 
   it('handles a book with unknown copyright (null)', async () => {
@@ -175,7 +177,7 @@ describe('gutenbergGetBook', () => {
 
     it('renders title, ID, authors, subjects, and formats', () => {
       const blocks = gutenbergGetBook.format!(fullOutput);
-      expect(blocks[0].type).toBe('text');
+      expect(blocks[0]?.type).toBe('text');
       const text = (blocks[0] as { text: string }).text;
 
       expect(text).toContain('Pride and Prejudice');

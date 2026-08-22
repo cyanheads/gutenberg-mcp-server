@@ -52,9 +52,9 @@ describe('gutenbergSearchBooks', () => {
     const result = await gutenbergSearchBooks.handler(input, ctx);
 
     expect(result.books).toHaveLength(1);
-    expect(result.books[0].id).toBe(1342);
-    expect(result.books[0].title).toBe('Pride and Prejudice');
-    expect(result.books[0].has_plain_text).toBe(true);
+    expect(result.books[0]?.id).toBe(1342);
+    expect(result.books[0]?.title).toBe('Pride and Prejudice');
+    expect(result.books[0]?.has_plain_text).toBe(true);
     expect(result.totalCount).toBe(1);
     expect(result.hasMore).toBe(false);
     expect(result.page).toBe(1);
@@ -169,7 +169,9 @@ describe('gutenbergSearchBooks', () => {
     const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
     const input = gutenbergSearchBooks.input.parse({ query: 'anything', page: 2 });
 
-    const err = await gutenbergSearchBooks.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(gutenbergSearchBooks.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
     expect(err).toBeInstanceOf(McpError);
     expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
     expect((err as McpError).data?.reason).toBeUndefined();
@@ -190,8 +192,8 @@ describe('gutenbergSearchBooks', () => {
     const input = gutenbergSearchBooks.input.parse({});
     const result = await gutenbergSearchBooks.handler(input, ctx);
 
-    expect(result.books[0].authors[0].birth_year).toBeNull();
-    expect(result.books[0].authors[0].death_year).toBeNull();
+    expect(result.books[0]?.authors[0]?.birth_year).toBeNull();
+    expect(result.books[0]?.authors[0]?.death_year).toBeNull();
   });
 
   describe('format()', () => {
@@ -213,7 +215,7 @@ describe('gutenbergSearchBooks', () => {
         hasMore: false,
       };
       const blocks = gutenbergSearchBooks.format!(output);
-      expect(blocks[0].type).toBe('text');
+      expect(blocks[0]?.type).toBe('text');
       const text = (blocks[0] as { text: string }).text;
 
       expect(text).toContain('1342');

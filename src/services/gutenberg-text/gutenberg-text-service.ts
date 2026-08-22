@@ -135,7 +135,7 @@ export class GutenbergTextService {
     return withRetry(
       async () => {
         const reqCtx = requestContextService.createRequestContext({
-          parentContext: ctx as unknown as Record<string, unknown>,
+          parentContext: ctx,
           operation: 'GutenbergTextService.fetchRaw',
         });
         const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, {

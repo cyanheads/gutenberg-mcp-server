@@ -11,10 +11,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   title: 'Browse Popular Gutenberg Books',
   description:
-    'Browse the most-downloaded Project Gutenberg books, ordered by popularity. Returns up to ' +
-    '32 titles with their Gutenberg IDs, authors, languages, and download counts. Optionally ' +
-    'filter by language or topic. Use this as a discovery entry point — "what are the most ' +
-    'popular classics in French?" — or as a heartbeat check that the catalog is reachable.',
+    'Browse the most-downloaded Project Gutenberg books, ordered by popularity. Returns up to 32 titles with their Gutenberg IDs, authors, languages, and download counts. Optionally filter by language or topic. Use this as a discovery entry point — "what are the most popular classics in French?" — or as a heartbeat check that the catalog is reachable.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
