@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -105,7 +105,7 @@ Project Gutenberg integration:
 
 - Catalog search and metadata via [Gutendex](https://gutendex.com/) — an unofficial but stable JSON API over the Gutenberg dataset
 - Full plain-text retrieval from a Project Gutenberg content mirror (permits automated access) with transparent UTF-8/HTML fallback
-- In-session text caching: book text is fetched once per session and served from cache for subsequent chunk reads
+- Tenant-scoped text caching: book text is fetched once per tenant and served from cache for subsequent chunk reads
 - No API key required — Project Gutenberg data is freely available; no registration needed
 
 Agent-friendly output:
@@ -199,7 +199,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.11](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
 - No API key required — Project Gutenberg data is freely available.
 
 ### Installation
@@ -238,6 +238,7 @@ cp .env.example .env
 | `GUTENDEX_BASE_URL` | Base URL for the Gutendex catalog API. Override for self-hosted instances. | `https://gutendex.com/books/` |
 | `GUTENBERG_TEXT_BASE_URL` | Base URL for a Project Gutenberg content mirror serving the `/cache/epub` file tree. Override to use a different mirror. | `https://gutenberg.pglaf.org` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
+| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. The schema default `auto` resolves to stateful. | `stateless` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
@@ -292,7 +293,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config/server-config.ts` | Server-specific environment variable parsing (Gutendex and file-server URL overrides). |
 | `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). |
 | `src/services/gutendex/` | Gutendex catalog API client — search and book metadata. |
-| `src/services/gutenberg-text/` | Full plain-text retrieval, boilerplate stripping, in-session caching, and chunking. |
+| `src/services/gutenberg-text/` | Full plain-text retrieval, boilerplate stripping, tenant-scoped caching, and chunking. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ---
