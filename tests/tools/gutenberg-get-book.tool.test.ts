@@ -3,8 +3,9 @@
  * @module tests/tools/gutenberg-get-book.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 
@@ -30,6 +31,7 @@ const mockBook = {
   media_type: 'Text',
   download_count: 75000,
   summary: null,
+  summaries: [],
   formats: {
     'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/1342.txt.utf-8',
     'text/html': 'https://www.gutenberg.org/ebooks/1342.html',
@@ -168,6 +170,7 @@ describe('gutenbergGetBook', () => {
       media_type: 'Text',
       download_count: 75000,
       summary: null,
+      summaries: [],
       formats: {
         'text/plain; charset=utf-8': 'https://www.gutenberg.org/cache/epub/1342/pg1342.txt',
         'text/html': 'https://www.gutenberg.org/ebooks/1342.html',
@@ -218,5 +221,169 @@ describe('gutenbergGetBook', () => {
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Maude, Aylmer');
     });
+
+    it('renders editors when present', () => {
+      const withEditor = {
+        ...fullOutput,
+        editors: [{ name: 'Dods, Marcus', birth_year: 1834, death_year: 1909 }],
+      };
+      const blocks = gutenbergGetBook.format!(withEditor);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('Dods, Marcus');
+      expect(text).toContain('1834');
+    });
+
+    // ── Explicit empty/null states (#10) ─────────────────────────────────────
+    //
+    // structuredContent carries `[]` and `null` verbatim; a content[]-only client
+    // that sees no line cannot tell "known empty" from "not reported".
+
+    it('renders an explicit line for every empty collection', () => {
+      const empty = {
+        ...fullOutput,
+        authors: [],
+        translators: [],
+        editors: [],
+        subjects: [],
+        bookshelves: [],
+      };
+      const blocks = gutenbergGetBook.format!(empty);
+      const text = (blocks[0] as { text: string }).text;
+
+      expect(text).toContain('**Authors:** None');
+      expect(text).toContain('**Translators:** None');
+      expect(text).toContain('**Editors:** None');
+      expect(text).toContain('**Subjects:** None');
+      expect(text).toContain('**Bookshelves:** None');
+    });
+
+    it('renders a null summary as explicitly unavailable rather than omitting it', () => {
+      const blocks = gutenbergGetBook.format!({ ...fullOutput, summary: null });
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('**Summary:** Not available');
+    });
+
+    // ── Full summary set (#11) ───────────────────────────────────────────────
+
+    it('renders every summary beyond the first, not only the singular summary', () => {
+      const twoSummaries = {
+        ...fullOutput,
+        summary: 'The first English translation.',
+        summaries: ['The first English translation.', 'A shorter blurb.'],
+      };
+      const blocks = gutenbergGetBook.format!(twoSummaries);
+      const text = (blocks[0] as { text: string }).text;
+
+      expect(text).toContain('The first English translation.');
+      expect(text).toContain('A shorter blurb.');
+    });
+
+    it('does not repeat the singular summary in the additional-summaries list', () => {
+      const oneSummary = {
+        ...fullOutput,
+        summary: 'Only summary.',
+        summaries: ['Only summary.'],
+      };
+      const text = (gutenbergGetBook.format!(oneSummary)[0] as { text: string }).text;
+      expect(text.match(/Only summary\./g)).toHaveLength(1);
+    });
+
+    it('renders the summaries field explicitly when the array is empty', () => {
+      const blocks = gutenbergGetBook.format!({ ...fullOutput, summary: null, summaries: [] });
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('**Additional summaries:** None');
+    });
+  });
+});
+
+// ── Editors and full summary set on both surfaces (#10, #11) ─────────────────
+
+describe('gutenbergGetBook — sparse and multi-summary records end to end', () => {
+  it('carries editors and every summary on structuredContent and content[]', async () => {
+    mockGutendexService.getBook.mockResolvedValue({
+      ...mockBook,
+      id: 45304,
+      title: 'The City of God, Volume I',
+      editors: [{ name: 'Dods, Marcus', birth_year: 1834, death_year: 1909 }],
+      summary: 'A work of Christian philosophy.',
+      summaries: ['A work of Christian philosophy.', 'A shorter blurb.'],
+    });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 45304 });
+    const structured = result.structuredContent as {
+      editors: { name: string }[];
+      summaries: string[];
+      summary: string;
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.editors).toHaveLength(1);
+    expect(structured.summaries).toHaveLength(2);
+    expect(structured.summary).toBe('A work of Christian philosophy.');
+    expect(text).toContain('Dods, Marcus');
+    expect(text).toContain('A shorter blurb.');
+  });
+
+  it('states every absent field explicitly on content[] for a bare record', async () => {
+    mockGutendexService.getBook.mockResolvedValue({
+      ...mockBook,
+      authors: [],
+      translators: [],
+      editors: [],
+      subjects: [],
+      bookshelves: [],
+      summary: null,
+      summaries: [],
+    });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 1342 });
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBeFalsy();
+    for (const line of [
+      '**Authors:** None',
+      '**Translators:** None',
+      '**Editors:** None',
+      '**Subjects:** None',
+      '**Bookshelves:** None',
+      '**Summary:** Not available',
+      '**Additional summaries:** None',
+    ]) {
+      expect(text).toContain(line);
+    }
+  });
+});
+
+// ── Catalog outage contract (#12) ────────────────────────────────────────────
+
+describe('gutenbergGetBook — catalog_unavailable', () => {
+  it('surfaces the declared reason and recovery hint on both client surfaces', async () => {
+    mockGutendexService.getBook.mockImplementation((_id: number, ctx: Context) =>
+      Promise.reject(
+        serviceUnavailable('The Project Gutenberg catalog did not respond for book 1342.', {
+          reason: 'catalog_unavailable',
+          ...ctx.recoveryFor('catalog_unavailable'),
+        }),
+      ),
+    );
+
+    const result = await runToolContract(gutenbergGetBook, { id: 1342 });
+    const structured = result.structuredContent as {
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(structured.error.data).toMatchObject({
+      reason: 'catalog_unavailable',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(text).toContain('Recovery:');
+    expect(text).not.toContain('gutendex.com');
   });
 });

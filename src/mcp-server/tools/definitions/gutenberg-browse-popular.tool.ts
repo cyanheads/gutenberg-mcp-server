@@ -98,7 +98,13 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   // that content[]-only clients (e.g. Claude Desktop) see alongside format().
   enrichmentTrailer: {
     truncated: {
-      render: () => 'Truncated — the catalog holds more matching books than are shown here.',
+      // The framework renders a trailer line for every key present in the
+      // enrichment store, so this fires on complete results too — branch on the
+      // value rather than always claiming truncation.
+      render: (value) =>
+        value
+          ? 'Truncated — the catalog holds more matching books than are shown here.'
+          : 'Complete — every matching book in the catalog is shown here.',
     },
     shown: {
       render: (value) => `Returned the top ${value} by download count.`,
@@ -123,6 +129,14 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       when: 'No books match the language/topic filter combination.',
       recovery:
         'Try a broader topic phrase or remove the language filter. The catalog is large but topic matching is phrase-based — "detective fiction" may miss books shelved under "Mystery".',
+    },
+    {
+      reason: 'catalog_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one browse.',
+      recovery:
+        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a narrower filter will not help.',
+      retryable: true,
     },
   ],
 
@@ -159,6 +173,12 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
         guidance:
           'The catalog holds more matches than shown. Raise limit (max 32) for a longer list, or use gutenberg_search_books to page through all results.',
       });
+    } else {
+      // `truncated`, `shown`, and `cap` are required enrichment fields, and
+      // `ctx.enrich.truncated(...)` writes `truncated: true` unconditionally — so
+      // the complete case has to populate them through the loose call, or the
+      // effective-output parse rejects an otherwise-valid response.
+      ctx.enrich({ truncated: false, shown: limited.length, cap: input.limit });
     }
 
     return {

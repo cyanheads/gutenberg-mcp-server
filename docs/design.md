@@ -57,7 +57,7 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 | `GutendexService` | Gutendex catalog API (`gutendex.com/books/`) | `gutenberg_search_books`, `gutenberg_get_book`, `gutenberg_browse_popular` |
 | `GutenbergTextService` | Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) | `gutenberg_get_text` |
 
-Both services are thin HTTP clients with retry, timeout, and response-parse logic. No shared state beyond an optional in-process response cache.
+Both services are thin HTTP clients with retry, timeout, and response-parse logic. No shared state beyond an optional in-process response cache. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
 
 ---
 
@@ -204,7 +204,8 @@ tool('gutenberg_get_book', {
     copyright: z.boolean().nullable().describe('Copyright status: false = public domain in the USA, true = under copyright, null = unknown.'),
     media_type: z.string().describe('"Text" for readable books, "Sound" for audio books. Only "Text" books have plain-text content available for gutenberg_get_text.'),
     download_count: z.number().describe('Total downloads — popularity signal.'),
-    summary: z.string().nullable().describe('Auto-generated summary of the work, when available. Absent on many older records.'),
+    summary: z.string().nullable().describe('First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.'),
+    summaries: z.array(z.string()).describe('Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.'),
     formats: z.record(z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
     has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format ("text/plain; charset=utf-8") is present in formats — prerequisite for gutenberg_get_text. Audio books (media_type "Sound") may have text/plain entries that are readme files; they return false here.'),
   }),
@@ -220,7 +221,7 @@ tool('gutenberg_get_book', {
 })
 ```
 
-**`format()` rendering:** structured display of title, authors (with years), translators/editors if present, subjects, bookshelves, languages, copyright, download count, summary if present, and all formats as a readable key→URL list.
+**`format()` rendering:** structured display of title, authors/translators/editors (with years), subjects, bookshelves, languages, copyright, download count, summary, any summaries beyond the first, and all formats as a readable key→URL list. Every field renders unconditionally — an empty collection reads `None` and a null summary `Not available` — so a `content[]`-only client can tell a known-empty field from one the server did not report.
 
 ---
 
@@ -427,11 +428,11 @@ The HTML fallback is less clean than plain text — formatting artifacts from ma
 
 | # | Call | Purpose | Notes |
 |:--|:-----|:--------|:------|
-| 1 | `GET gutendex.com/books/{id}/` | Resolve format URL + verify media_type | Cached; throws `audio_book` or `no_text_format` early |
-| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; 30s timeout |
+| 1 | `GET gutendex.com/books/{id}/` | Resolve format URL + verify media_type | Cached; throws `audio_book` or `no_text_format` early; 5s per attempt under a 15s ladder budget |
+| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; 30s per attempt under a 35s ladder budget |
 | — | In-process pipeline | BOM strip, marker extraction, normalize, chunk | CPU-only; ~1–5ms |
 
-Two upstream calls total for a cache miss, one (or zero) for a cache hit. The catalog call and the text fetch are independent enough to parallelize — but since the text URL comes from the catalog record, they must be sequential on a cache miss. Parallelism only helps after the first call populates the catalog cache.
+Two upstream calls total for a cache miss, one (or zero) for a cache hit. Worst case both hops exhaust their budgets: 50 seconds, inside the 60-second default MCP client request timeout, so the caller receives a real error instead of its own timeout. The catalog call and the text fetch are independent enough to parallelize — but since the text URL comes from the catalog record, they must be sequential on a cache miss. Parallelism only helps after the first call populates the catalog cache.
 
 ### Typical agent workflow
 
@@ -468,9 +469,13 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
 | **No `mime_type` filter parameter exposed** | The Gutendex `mime_type` filter exists but is low-value for agents: agents want "books with readable text" not "books with this exact MIME string". The `has_plain_text` computed field covers the practical need. |
 | **`copyright` filter not exposed** | All Gutenberg books are public domain or public-domain-in-USA (copyright: false). The `true` and `null` buckets are edge cases not relevant to the server's stated purpose. Exposing the filter would add noise for no agent benefit. |
-| **`summary` as nullable** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. Expose as a nullable string (first element of the array if present, null otherwise) to avoid forcing agents to handle the array structure. |
+| **`summary` as nullable, with the full `summaries` array alongside** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. `summary` stays a nullable string — the first element if present — so the common single-summary read needs no array handling; `summaries` carries the complete set for the records that hold more than one, which reducing to the first element silently dropped. `content[]` lists only the entries beyond `summary` rather than repeating a multi-hundred-character paragraph. |
+| **`content[]` states absent fields rather than omitting them** | `structuredContent` carries `[]` and `null` verbatim, so a formatter that drops the line leaves a `content[]`-only client unable to distinguish a known-empty field from one the server never reported. Every collection and nullable in `gutenberg_get_book`, and the per-book subject list in `gutenberg_search_books`, therefore render unconditionally. Sentinel-based `format-parity` linting exercises one populated value per leaf and cannot catch value-dependent omission, so the empty states are covered by tests instead. |
 | **Refuse audio books explicitly** | Audio books have `media_type: "Sound"` and no literary text. Returning a readme file or an error without a clear message would confuse agents. The `audio_book` error contract gives a specific reason and recovery path. |
 | **No search-within-book tool (deferred)** | Passage/quote search within a book requires either full-text indexing (non-trivial service layer) or sequential scanning across chunks (many API calls). Deferred to a future enhancement. Agents can page through `get_text` chunks and apply their own search logic. |
+| **One wall-clock budget per upstream ladder, composed with `ctx.signal`** | `RetryOptions` has no elapsed-time field, and a ceiling checked only between attempts still overshoots by a whole in-flight attempt. The budget is therefore an `AbortSignal` threaded into both `withRetry` and `fetchWithTimeout`, so it tears the request down rather than racing it. The catalog ladder gets 15s and the text ladder 35s, keeping the two-hop `gutenberg_get_text` worst case under the 60s default client timeout — past that the client cancels first and the caller gets no error at all. |
+| **Catalog per-attempt timeout of 5s, well under Gutendex's own ~15s boundary** | Measured Gutendex latency is bimodal: warm queries answer in tens of milliseconds, cold ones not at all until the upstream's own gateway gives up around 15s, with nothing observed in between. What clears a cold query is a later attempt finding the cache filled, not the current one waiting longer — so a short per-attempt ceiling buys three attempts inside the budget where a long one buys two, at no cost to any answer the upstream would actually have returned. The text mirror is the opposite case and keeps its 30s attempt: multi-megabyte files legitimately take tens of seconds. |
+| **Upstream outages are declared contract reasons, not bubbled fetch errors** | `catalog_unavailable` (all four tools) and `text_fetch_failed` (`gutenberg_get_text`) carry a recovery hint to both `structuredContent.error.data` and the mirrored `content[]` text. Their messages name the catalog or the book rather than the resolved request URL, which embeds an operator-configured, overridable base URL. The original error stays on `cause` for server-side logs. A caller cancel is never relabelled — it is not an upstream outage, and advertising a retry for it would be wrong. |
 | **`GUTENDEX_BASE_URL` and `GUTENBERG_TEXT_BASE_URL` override env vars** | Gutendex is open-source and self-hostable; the project explicitly encourages it. Some deployers may also run Gutenberg mirrors. Overrides cost nothing to implement and unlock private/enterprise deployments. |
 
 ---
@@ -486,4 +491,4 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Gutendex page size capped at 32** | The Gutendex API returns at most 32 results per page with no `page_size` parameter. Agents needing more results must call `gutenberg_search_books` multiple times with incrementing `page` values. |
 | **Very large books** | War and Peace is ~3MB of stripped text, over 150 20,000-character chunks. The in-process cache holds this fine, but complete ingestion by an agent would require many sequential calls. This is a corpus property, not a server limitation — the chunking design exists specifically to handle it. |
 | **Gutenberg mirror latency** | The configured Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) can be slow, especially for less-popular books whose files are not in its cache. The 30-second fetch timeout and 24-hour text cache mitigate repeated latency. |
-| **Gutendex API availability** | Gutendex is a community-run service. The `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |
+| **Gutendex API availability** | Gutendex is a community-run service, and cold queries routinely stall past its own gateway boundary. A ladder that exhausts its budget surfaces `catalog_unavailable` with a retry hint; the `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |

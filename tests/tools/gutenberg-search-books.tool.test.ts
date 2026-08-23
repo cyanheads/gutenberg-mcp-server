@@ -3,8 +3,9 @@
  * @module tests/tools/gutenberg-search-books.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
 
@@ -283,6 +284,62 @@ describe('gutenbergSearchBooks', () => {
       expect(text).toContain('page=2');
     });
 
+    it('renders an explicit subjects line for a book with no subject headings', () => {
+      // structuredContent carries `subjects: []`; without a line, a content[]-only
+      // client cannot tell "no subject headings" from "subjects not reported".
+      const output = {
+        books: [
+          {
+            id: 12345,
+            title: 'Unclassified Work',
+            authors: [{ name: 'Anonymous', birth_year: null, death_year: null }],
+            languages: ['en'],
+            subjects: [],
+            download_count: 12,
+            has_plain_text: true,
+          },
+        ],
+        totalCount: 1,
+        page: 1,
+        hasMore: false,
+      };
+      const text = (gutenbergSearchBooks.format!(output)[0] as { text: string }).text;
+      expect(text).toContain('Subjects: None');
+    });
+
+    it('renders a subjects line for every book when only some have subjects', () => {
+      const output = {
+        books: [
+          {
+            id: 1,
+            title: 'Classified',
+            authors: [],
+            languages: ['en'],
+            subjects: ['Fiction'],
+            download_count: 5,
+            has_plain_text: true,
+          },
+          {
+            id: 2,
+            title: 'Unclassified',
+            authors: [],
+            languages: ['en'],
+            subjects: [],
+            download_count: 4,
+            has_plain_text: true,
+          },
+        ],
+        totalCount: 2,
+        page: 1,
+        hasMore: false,
+      };
+      const text = (gutenbergSearchBooks.format!(output)[0] as { text: string }).text;
+
+      expect(text.match(/Subjects:/g)).toHaveLength(2);
+      expect(text).toContain('Subjects: Fiction');
+      expect(text).toContain('Subjects: None');
+    });
+
     it('renders authors with null years as unknown (?)', () => {
       const output = {
         books: [
@@ -306,6 +363,28 @@ describe('gutenbergSearchBooks', () => {
       // The format function only adds years when at least one is non-null — verify no crash
       expect(text).toContain('Anonymous');
     });
+  });
+});
+
+// ── Empty subjects on both surfaces (#13) ────────────────────────────
+
+describe('gutenbergSearchBooks — subject-free results', () => {
+  it('reports the empty subjects array on content[] as well as structuredContent', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [{ ...mockBook, id: 12345, title: 'Unclassified Work', subjects: [] }],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+
+    const result = await runToolContract(gutenbergSearchBooks, { query: 'unclassified' });
+    const structured = result.structuredContent as { books: { subjects: string[] }[] };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.books[0]?.subjects).toEqual([]);
+    expect(text).toContain('Subjects: None');
   });
 });
 
@@ -350,5 +429,41 @@ describe('cache key storage-validity', () => {
     const key = 'gutenberg/text/84';
     expect(VALID_KEY_PATTERN.test(key)).toBe(true);
     expect(key).not.toContain(':');
+  });
+});
+
+// ── Catalog outage contract (#12) ────────────────────────────────────────────
+
+describe('gutenbergSearchBooks — catalog_unavailable', () => {
+  /**
+   * The service resolves the hint through `ctx.recoveryFor`, which only answers
+   * for a reason the calling tool declares — so this fails unless the contract
+   * carries the entry, and it fails on both surfaces a client might read.
+   */
+  it('surfaces the declared reason and recovery hint on both client surfaces', async () => {
+    mockGutendexService.searchBooks.mockImplementation((_params: unknown, ctx: Context) =>
+      Promise.reject(
+        serviceUnavailable('The Project Gutenberg catalog did not respond.', {
+          reason: 'catalog_unavailable',
+          ...ctx.recoveryFor('catalog_unavailable'),
+        }),
+      ),
+    );
+
+    const result = await runToolContract(gutenbergSearchBooks, { query: 'austen' });
+    const structured = result.structuredContent as {
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(structured.error.data).toMatchObject({
+      reason: 'catalog_unavailable',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(text).toContain('Recovery:');
+    expect(text).not.toContain('gutendex.com');
   });
 });

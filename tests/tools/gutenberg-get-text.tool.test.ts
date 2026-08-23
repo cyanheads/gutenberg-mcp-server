@@ -4,8 +4,9 @@
  * @module tests/tools/gutenberg-get-text.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetText } from '@/mcp-server/tools/definitions/gutenberg-get-text.tool.js';
 import { GutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
@@ -45,6 +46,7 @@ const textBook = {
   media_type: 'Text',
   download_count: 45000,
   summary: null,
+  summaries: [],
   formats: {
     'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/84.txt.utf-8',
   },
@@ -421,22 +423,111 @@ describe('gutenbergGetText — error paths', () => {
     });
   });
 
-  it('propagates text_fetch_failed reason when the text service fetch fails', async () => {
+  it('propagates text_fetch_failed with the declared recovery hint when the mirror fails', async () => {
+    // Mirrors what GutenbergTextService raises on a spent mirror ladder: a stable
+    // message naming the book, plus the hint resolved from the calling tool's own
+    // contract. Asserting the hint is what separates a fixed contract from a bare
+    // reason tag — a subset match on the reason alone passes either way.
     mockGutendexService.getBook.mockResolvedValue(textBook);
-    // Simulate what GutenbergTextService.fetchAndCacheText does on network failure:
-    // it wraps the error in serviceUnavailable with data.reason = 'text_fetch_failed'
-    mockTextService.fetchAndCacheText.mockRejectedValue(
-      serviceUnavailable('Failed to fetch text for book 84: Connection timeout', {
-        reason: 'text_fetch_failed',
-      }),
+    mockTextService.fetchAndCacheText.mockImplementation(
+      (_book: unknown, id: number, ctx: Context) =>
+        Promise.reject(
+          serviceUnavailable(
+            `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+            { reason: 'text_fetch_failed', ...ctx.recoveryFor('text_fetch_failed') },
+          ),
+        ),
     );
     const ctx = createMockContext({ errors: gutenbergGetText.errors });
     const input = gutenbergGetText.input.parse({ id: 84 });
 
     await expect(gutenbergGetText.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'text_fetch_failed' },
+      data: { reason: 'text_fetch_failed', recovery: { hint: expect.any(String) } },
     });
+  });
+
+  it('propagates catalog_unavailable from the catalog hop, distinct from a mirror failure', async () => {
+    // This tool touches two upstreams that fail independently; a catalog outage
+    // must not be reported as the file server refusing to serve text.
+    mockGutendexService.getBook.mockImplementation((id: number, ctx: Context) =>
+      Promise.reject(
+        serviceUnavailable(`The Project Gutenberg catalog did not respond for book ${id}.`, {
+          reason: 'catalog_unavailable',
+          ...ctx.recoveryFor('catalog_unavailable'),
+        }),
+      ),
+    );
+    const ctx = createMockContext({ errors: gutenbergGetText.errors });
+    const input = gutenbergGetText.input.parse({ id: 84 });
+
+    await expect(gutenbergGetText.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'catalog_unavailable', recovery: { hint: expect.any(String) } },
+    });
+    expect(mockTextService.fetchAndCacheText).not.toHaveBeenCalled();
+  });
+});
+
+// ── Upstream outages on both client surfaces (#9, #12) ───────────────────────
+
+describe('gutenbergGetText — upstream outages reach both client surfaces', () => {
+  it('carries the text_fetch_failed hint to structuredContent and content[], with no mirror URL', async () => {
+    mockGutendexService.getBook.mockResolvedValue(textBook);
+    mockTextService.fetchAndCacheText.mockImplementation(
+      (_book: unknown, id: number, ctx: Context) =>
+        Promise.reject(
+          serviceUnavailable(
+            `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+            { reason: 'text_fetch_failed', ...ctx.recoveryFor('text_fetch_failed') },
+          ),
+        ),
+    );
+
+    const result = await runToolContract(gutenbergGetText, { id: 84 });
+    const structured = result.structuredContent as {
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(structured.error.data).toMatchObject({
+      reason: 'text_fetch_failed',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(text).toContain('Recovery:');
+    expect(structured.error.message).toContain('84');
+    expect(structured.error.message).not.toContain('pglaf');
+    expect(structured.error.message).not.toContain('cache/epub');
+    expect(structured.error.message).not.toContain('http');
+  });
+
+  it('carries the catalog_unavailable hint to structuredContent and content[]', async () => {
+    mockGutendexService.getBook.mockImplementation((id: number, ctx: Context) =>
+      Promise.reject(
+        serviceUnavailable(`The Project Gutenberg catalog did not respond for book ${id}.`, {
+          reason: 'catalog_unavailable',
+          ...ctx.recoveryFor('catalog_unavailable'),
+        }),
+      ),
+    );
+
+    const result = await runToolContract(gutenbergGetText, { id: 84 });
+    const structured = result.structuredContent as {
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.data).toMatchObject({
+      reason: 'catalog_unavailable',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(text).toContain('Recovery:');
+    expect(text).not.toContain('gutendex.com');
   });
 });
 

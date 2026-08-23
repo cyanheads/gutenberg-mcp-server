@@ -135,6 +135,14 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       recovery:
         'Request a page within the available range, or restart at page 1. The first page reports totalCount — divide it by the page size (32) to find the last page.',
     },
+    {
+      reason: 'catalog_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one search.',
+      recovery:
+        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
+      retryable: true,
+    },
   ],
 
   async handler(input, ctx) {
@@ -223,9 +231,9 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       lines.push(
         `  Authors: ${authorStr} | Lang: ${book.languages.join(', ')} | Downloads: ${book.download_count.toLocaleString()} | Text: ${book.has_plain_text ? 'Yes' : 'No'}`,
       );
-      if (book.subjects.length > 0) {
-        lines.push(`  Subjects: ${book.subjects.join('; ')}`);
-      }
+      // Unconditional: structuredContent carries `subjects: []` verbatim, so a
+      // content[]-only client needs the empty case stated, not the line dropped.
+      lines.push(`  Subjects: ${book.subjects.length > 0 ? book.subjects.join('; ') : 'None'}`);
     }
     if (result.hasMore) {
       lines.push('');

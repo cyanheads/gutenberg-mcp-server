@@ -3,8 +3,9 @@
  * @module tests/tools/gutenberg-browse-popular.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergBrowsePopular } from '@/mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
 
@@ -78,7 +79,7 @@ describe('gutenbergBrowsePopular', () => {
     });
   });
 
-  it('omits truncation disclosure when all matches are returned', async () => {
+  it('reports the result set as complete when all matches are returned', async () => {
     const allBooks = Array.from({ length: 3 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
       books: allBooks,
@@ -91,7 +92,10 @@ describe('gutenbergBrowsePopular', () => {
     const input = gutenbergBrowsePopular.input.parse({ limit: 20 });
     await gutenbergBrowsePopular.handler(input, ctx);
 
-    expect(getEnrichment(ctx).truncated).toBeUndefined();
+    // The three fields are required enrichment; leaving them unpopulated fails
+    // the effective-output parse rather than reading as "nothing to disclose".
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 3, cap: 20 });
+    expect(getEnrichment(ctx)).not.toHaveProperty('truncationCeiling');
   });
 
   it('applies limit default of 20', async () => {
@@ -224,6 +228,15 @@ describe('gutenbergBrowsePopular', () => {
     it('renders no truncationCeiling line when the value is absent', () => {
       expect(trailer?.truncationCeiling?.render?.(undefined)).toBe('');
     });
+
+    it('renders truncated=false as a completeness statement, not the truncation sentence', () => {
+      // The framework calls this render for every key present in the enrichment
+      // store, so a value-blind render would fire the truncation sentence on
+      // exactly the complete responses it does not describe.
+      const line = trailer?.truncated?.render?.(false);
+      expect(line).not.toContain('more matching books');
+      expect(line).toMatch(/complete/i);
+    });
   });
 
   describe('format()', () => {
@@ -282,5 +295,104 @@ describe('gutenbergBrowsePopular', () => {
       expect(text).toContain('Anonymous');
       expect(text).toContain('No'); // has_plain_text false
     });
+  });
+});
+
+// ── Enrichment on the full contract boundary (#8) ────────────────────────────
+//
+// The three enrichment fields are required, and the effective-output parse that
+// enforces that runs inside buildToolSuccessResult — which a direct .handler()
+// call never reaches. These drive the definition through runToolContract so the
+// non-truncated path is checked where it actually failed.
+
+describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
+  /** Join every content block: the enrichment trailer is its own trailing block. */
+  const allText = (result: { content?: unknown[] }): string =>
+    (result.content ?? []).map((block) => (block as { text?: string }).text ?? '').join('\n');
+
+  it('returns a complete result when the catalog holds no more than the limit', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [makeBook(1)],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+
+    const result = await runToolContract(gutenbergBrowsePopular, { languages: ['ia'], limit: 32 });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.truncated).toBe(false);
+    expect(structured.shown).toBe(1);
+    expect(structured.cap).toBe(32);
+    expect(structured).not.toHaveProperty('truncationCeiling');
+    expect((structured.books as unknown[]).length).toBe(1);
+  });
+
+  it('states completeness in the content[] trailer without the truncation sentence', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [makeBook(1)],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+
+    const text = allText(await runToolContract(gutenbergBrowsePopular, { limit: 32 }));
+
+    expect(text).not.toContain('more matching books');
+    expect(text).toMatch(/complete/i);
+    expect(text).toContain('Returned the top 1 by download count.');
+  });
+
+  it('still discloses truncation on both surfaces when the catalog holds more', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
+      totalCount: 65000,
+      hasMore: true,
+      page: 1,
+    });
+
+    const result = await runToolContract(gutenbergBrowsePopular, { limit: 5 });
+    const structured = result.structuredContent as Record<string, unknown>;
+    const text = allText(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.truncated).toBe(true);
+    expect(structured.shown).toBe(5);
+    expect(structured.cap).toBe(5);
+    expect(structured.truncationCeiling).toBe(makeBook(5).download_count);
+    expect(text).toContain('more matching books');
+    expect(text).toContain('gutenberg_search_books');
+  });
+});
+
+// ── Catalog outage contract (#12) ────────────────────────────────────────────
+
+describe('gutenbergBrowsePopular — catalog_unavailable', () => {
+  it('surfaces the declared reason and recovery hint on both client surfaces', async () => {
+    mockGutendexService.searchBooks.mockImplementation((_params: unknown, ctx: Context) =>
+      Promise.reject(
+        serviceUnavailable('The Project Gutenberg catalog did not respond.', {
+          reason: 'catalog_unavailable',
+          ...ctx.recoveryFor('catalog_unavailable'),
+        }),
+      ),
+    );
+
+    const result = await runToolContract(gutenbergBrowsePopular, {});
+    const structured = result.structuredContent as {
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    const [firstBlock] = result.content ?? [];
+    const text = (firstBlock as { text: string }).text;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(structured.error.data).toMatchObject({
+      reason: 'catalog_unavailable',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(text).toContain('Recovery:');
+    expect(text).not.toContain('gutendex.com');
   });
 });

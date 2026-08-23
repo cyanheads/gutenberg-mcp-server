@@ -16,6 +16,8 @@ export interface RawBook {
   bookshelves: string[];
   copyright: boolean | null;
   download_count: number;
+  /** Absent on records Gutendex has no editor credit for; present as `[]` on most. */
+  editors?: RawPerson[];
   formats: Record<string, string>;
   id: number;
   languages: string[];
@@ -55,6 +57,9 @@ export interface Book {
   languages: string[];
   media_type: string;
   subjects: string[];
+  /** Every upstream summary, in upstream order. Empty when there are none. */
+  summaries: string[];
+  /** First entry of {@link summaries}, or null when upstream sent none. */
   summary: string | null;
   title: string;
   translators: Person[];

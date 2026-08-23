@@ -8,14 +8,26 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { Book } from '@/services/gutendex/types.js';
+import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
 import type { CachedText, FetchedText, SourceFormat, TextChunk } from './types.js';
 
+/**
+ * Per-attempt ceiling for one mirror file request. Books are whole files —
+ * multi-megabyte texts legitimately take tens of seconds — so this stays
+ * generous and the ladder budget below is what bounds the exchange.
+ */
 const TEXT_TIMEOUT_MS = 30_000;
+/**
+ * Wall-clock ceiling for a whole mirror ladder, aborting any request still in
+ * flight. Sized so a catalog hop plus a text hop still finishes inside the 60 s
+ * default MCP client request timeout with headroom to spare.
+ */
+const TEXT_BUDGET_MS = 35_000;
 const TEXT_TTL_SECONDS = 86_400; // 24 hours
 
 /** Regex matching the START marker (multiline, case from real files). */
@@ -130,25 +142,38 @@ export class GutenbergTextService {
   /**
    * Fetch the raw bytes for a book URL and decode as UTF-8. The mirror serves
    * generated UTF-8 for both the plain-text and HTML cache files.
+   *
+   * The whole ladder runs under one budget, and an exhausted budget surfaces as
+   * `text_fetch_failed` with the calling tool's declared recovery hint. The
+   * message names the book rather than the resolved cache-path URL, which
+   * carries the operator's configured mirror host; the original error stays on
+   * `cause` for server-side logs. A caller cancel passes through unchanged.
    */
-  private fetchRaw(url: string, ctx: Context): Promise<string> {
-    return withRetry(
-      async () => {
-        const reqCtx = requestContextService.createRequestContext({
-          parentContext: ctx,
-          operation: 'GutenbergTextService.fetchRaw',
-        });
-        const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, {
-          signal: ctx.signal,
-        });
-        const buffer = await response.arrayBuffer();
-        return new TextDecoder('utf-8').decode(buffer);
-      },
+  private fetchRaw(url: string, id: number, ctx: Context): Promise<string> {
+    return withUpstreamDeadline(
+      ctx,
       {
-        operation: 'GutenbergTextService.fetchRaw',
-        baseDelayMs: 2000,
-        signal: ctx.signal,
+        budgetMs: TEXT_BUDGET_MS,
+        message: `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+        reason: 'text_fetch_failed',
       },
+      (signal) =>
+        withRetry(
+          async () => {
+            const reqCtx = requestContextService.createRequestContext({
+              parentContext: ctx,
+              operation: 'GutenbergTextService.fetchRaw',
+            });
+            const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, { signal });
+            const buffer = await response.arrayBuffer();
+            return new TextDecoder('utf-8').decode(buffer);
+          },
+          {
+            operation: 'GutenbergTextService.fetchRaw',
+            baseDelayMs: 2000,
+            signal,
+          },
+        ),
     );
   }
 
@@ -185,7 +210,8 @@ export class GutenbergTextService {
 
   /**
    * Fetch, process, and cache the full stripped text for a book.
-   * Throws text_fetch_failed on HTTP/network errors, no_text_format if no usable format.
+   * Throws no_text_format if no usable format; `fetchRaw` throws text_fetch_failed
+   * when the mirror ladder exhausts its budget.
    */
   async fetchAndCacheText(book: Book, id: number, ctx: Context): Promise<CachedText> {
     const cacheKey = `gutenberg/text/${id}`;
@@ -203,20 +229,19 @@ export class GutenbergTextService {
       });
     }
 
-    ctx.log.info('Fetching book text', { id, url: resolved.url, format: resolved.format });
+    /**
+     * `ctx.log` is a dual sink — every call also leaves as `notifications/message`,
+     * so the payload is client-visible. The resolved URL carries the operator's
+     * configured mirror host; id and format identify the operation just as well,
+     * and the URL is reconstructible server-side from the base-URL config.
+     */
+    ctx.log.info('Fetching book text', { id, format: resolved.format });
 
-    let raw: string;
-    try {
-      raw = await this.fetchRaw(resolved.url, ctx);
-    } catch (err: unknown) {
-      const e = err as { code?: number; message?: string };
-      // Re-wrap as text_fetch_failed so the tool contract matches
-      throw serviceUnavailable(
-        `Failed to fetch text for book ${id}: ${e.message ?? String(err)}`,
-        { reason: 'text_fetch_failed' },
-        { cause: err as Error },
-      );
-    }
+    // fetchRaw owns the text_fetch_failed translation. Keeping it there rather
+    // than in a catch here leaves the two ctx.state cache operations around this
+    // call outside the failure class — a storage error bubbles as itself instead
+    // of being relabelled an upstream outage.
+    const raw = await this.fetchRaw(resolved.url, id, ctx);
 
     const processed = this.processRaw(raw, resolved.format);
 

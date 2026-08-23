@@ -1,10 +1,9 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-07-11 20:25:07
+Generated on: 2026-08-22 23:35:34
 
 ```text
 gutenberg-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ gutenberg-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -145,16 +146,20 @@ gutenberg-mcp-server/
 │   │   ├── gutenberg-text/
 │   │   │   ├── gutenberg-text-service.ts
 │   │   │   └── types.ts
-│   │   └── gutendex/
-│   │       ├── gutendex-service.ts
-│   │       └── types.ts
+│   │   ├── gutendex/
+│   │   │   ├── gutendex-service.ts
+│   │   │   └── types.ts
+│   │   └── upstream-deadline.ts
 │   └── index.ts
 ├── tests/
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/
-│   │   └── gutendex/
-│   │       └── gutendex-service.test.ts
+│   │   ├── gutenberg-text/
+│   │   │   └── gutenberg-text-service.test.ts
+│   │   ├── gutendex/
+│   │   │   └── gutendex-service.test.ts
+│   │   └── upstream-deadline.test.ts
 │   └── tools/
 │       ├── gutenberg-browse-popular.tool.test.ts
 │       ├── gutenberg-get-book.tool.test.ts

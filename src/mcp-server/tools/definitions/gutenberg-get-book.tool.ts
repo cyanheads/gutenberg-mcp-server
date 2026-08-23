@@ -8,6 +8,25 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
+/**
+ * Render a person list for `content[]`, stating an empty list explicitly so a
+ * content[]-only client can tell "no editors" from "editors not reported".
+ */
+function renderPeople(
+  people: readonly { name: string; birth_year: number | null; death_year: number | null }[],
+): string {
+  if (people.length === 0) return 'None';
+  return people
+    .map((p) => {
+      const years =
+        p.birth_year != null || p.death_year != null
+          ? ` (${p.birth_year ?? '?'}–${p.death_year ?? '?'})`
+          : '';
+      return `${p.name}${years}`;
+    })
+    .join(', ');
+}
+
 export const gutenbergGetBook = tool('gutenberg_get_book', {
   title: 'Get Gutenberg Book',
   description:
@@ -86,7 +105,12 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       .string()
       .nullable()
       .describe(
-        'Auto-generated summary of the work, when available. Absent on many older records.',
+        'First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.',
+      ),
+    summaries: z
+      .array(z.string())
+      .describe(
+        'Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.',
       ),
     formats: z
       .record(z.string(), z.string())
@@ -107,6 +131,14 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       when: 'No book exists with the given ID.',
       recovery:
         'Verify the ID with gutenberg_search_books. Gutenberg IDs are positive integers; this ID does not match any entry in the catalog.',
+    },
+    {
+      reason: 'catalog_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one lookup.',
+      recovery:
+        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
+      retryable: true,
     },
   ],
 
@@ -140,6 +172,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       media_type: book.media_type,
       download_count: book.download_count,
       summary: book.summary,
+      summaries: book.summaries,
       formats: book.formats,
       has_plain_text: book.has_plain_text,
     };
@@ -153,60 +186,36 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       `**ID:** ${result.id} | **Media:** ${result.media_type} | **Downloads:** ${result.download_count.toLocaleString()}`,
     );
 
-    if (result.authors.length > 0) {
-      const authorStr = result.authors
-        .map((a) => {
-          const years =
-            a.birth_year != null || a.death_year != null
-              ? ` (${a.birth_year ?? '?'}–${a.death_year ?? '?'})`
-              : '';
-          return `${a.name}${years}`;
-        })
-        .join(', ');
-      lines.push(`**Authors:** ${authorStr}`);
-    }
-
-    if (result.translators.length > 0) {
-      const transStr = result.translators
-        .map((t) => {
-          const years =
-            t.birth_year != null || t.death_year != null
-              ? ` (${t.birth_year ?? '?'}–${t.death_year ?? '?'})`
-              : '';
-          return `${t.name}${years}`;
-        })
-        .join(', ');
-      lines.push(`**Translators:** ${transStr}`);
-    }
-
-    if (result.editors.length > 0) {
-      const edStr = result.editors
-        .map((e) => {
-          const years =
-            e.birth_year != null || e.death_year != null
-              ? ` (${e.birth_year ?? '?'}–${e.death_year ?? '?'})`
-              : '';
-          return `${e.name}${years}`;
-        })
-        .join(', ');
-      lines.push(`**Editors:** ${edStr}`);
-    }
+    lines.push(`**Authors:** ${renderPeople(result.authors)}`);
+    lines.push(`**Translators:** ${renderPeople(result.translators)}`);
+    lines.push(`**Editors:** ${renderPeople(result.editors)}`);
 
     lines.push(
       `**Languages:** ${result.languages.join(', ')} | **Copyright:** ${result.copyright === false ? 'Public Domain (USA)' : result.copyright === true ? 'Under Copyright' : 'Unknown'}`,
     );
 
-    if (result.subjects.length > 0) {
-      lines.push(`**Subjects:** ${result.subjects.join('; ')}`);
-    }
+    lines.push(`**Subjects:** ${result.subjects.length > 0 ? result.subjects.join('; ') : 'None'}`);
+    lines.push(
+      `**Bookshelves:** ${result.bookshelves.length > 0 ? result.bookshelves.join('; ') : 'None'}`,
+    );
 
-    if (result.bookshelves.length > 0) {
-      lines.push(`**Bookshelves:** ${result.bookshelves.join('; ')}`);
-    }
+    lines.push('');
+    lines.push(`**Summary:** ${result.summary ?? 'Not available'}`);
 
-    if (result.summary) {
-      lines.push('');
-      lines.push(`**Summary:** ${result.summary}`);
+    /**
+     * `summary` is already the first entry of `summaries`; repeating it would
+     * double a multi-hundred-character paragraph on the common single-summary
+     * record. Listing only the remainder keeps content[] lossless against
+     * structuredContent without that cost.
+     */
+    const additionalSummaries = result.summaries.filter((s) => s !== result.summary);
+    if (additionalSummaries.length > 0) {
+      lines.push(`**Additional summaries (${additionalSummaries.length}):**`);
+      for (const [idx, summary] of additionalSummaries.entries()) {
+        lines.push(`  ${idx + 1}. ${summary}`);
+      }
+    } else {
+      lines.push('**Additional summaries:** None');
     }
 
     lines.push('');
