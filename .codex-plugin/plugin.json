@@ -1,6 +1,6 @@
 {
   "name": "gutenberg-mcp-server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
