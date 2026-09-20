@@ -1,13 +1,17 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "gutenberg-mcp-server",
   "version": "0.1.8",
   "description": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/gutenberg-mcp-server#readme",
   "repository": "https://github.com/cyanheads/gutenberg-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["gutenberg", "ebooks", "public-domain", "mcp", "mcp-server", "model-context-protocol"],
   "mcpServers": {
     "gutenberg-mcp-server": {
       "command": "npx",

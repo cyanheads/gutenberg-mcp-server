@@ -27,93 +27,83 @@
 
 ---
 
-## Tools
+## Overview
 
-Four tools for searching and reading Project Gutenberg's public-domain library:
+Project Gutenberg's library of 78,000+ public-domain books, cataloged through the Gutendex API and served from a Gutenberg content mirror. Search by title, author, topic, or language, fetch full book metadata, and retrieve plain-text content in offset/limit chunks for long works from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:-----|:------------|
-| `gutenberg_search_books` | Search the Gutenberg catalog by title, author, topic, language, or author lifespan — returns popularity-ordered results with IDs ready for follow-up calls |
-| `gutenberg_get_book` | Fetch complete metadata for a book by ID — full formats map, translators, editors, subjects, bookshelves, copyright status, and the `has_plain_text` flag |
-| `gutenberg_get_text` | Retrieve the plain-text content of a book, stripped of license boilerplate, with offset/limit chunking for context-budget management |
-| `gutenberg_browse_popular` | Browse the most-downloaded books, optionally filtered by language or topic — useful as a discovery entry point |
-
-### `gutenberg_search_books`
-
-Search the Project Gutenberg catalog of 78,000+ public-domain books.
-
-- Full-text search against titles and author names (space-separated words, case-insensitive)
-- Topic filter matches subject headings and bookshelf categories
-- Language filter by ISO 639-1 two-character codes (e.g., `["en"]`, `["fr", "de"]`)
-- Author lifespan range filter via `author_year_start` / `author_year_end`
-- Sort by popularity (download count), or by Gutenberg ID ascending/descending
-- Batch lookup by known ID list via `ids` parameter
-- Paginated — up to 32 books per page; use `totalCount` to determine total pages
-- Each result includes `has_plain_text` to indicate whether `gutenberg_get_text` will work
+| `gutenberg_search_books` | Search the catalog by title, author, topic, language, or author lifespan, with pagination and popularity sorting |
+| `gutenberg_get_book` | Fetch complete metadata for a book by ID — authors, translators, editors, full formats map, subjects, copyright status |
+| `gutenberg_get_text` | Retrieve a book's plain-text content stripped of license boilerplate, with offset/limit chunking |
+| `gutenberg_browse_popular` | Browse the most-downloaded books, optionally filtered by language or topic |
 
 ---
 
-### `gutenberg_get_book`
+## Capability reference
 
-Fetch complete metadata for a single Project Gutenberg book.
+### `gutenberg_search_books` <sub>tool</sub>
 
-- Returns the full formats map (MIME type → download URL) including plain text, HTML, EPUB, and cover image
-- Includes translators and editors alongside authors, each with birth/death years
-- `has_plain_text` flag confirms whether a UTF-8 plain-text format is available
-- `media_type` distinguishes readable text books from audio recordings
-- Use this before `gutenberg_get_text` to confirm text availability and inspect the formats map
-
----
-
-### `gutenberg_get_text`
-
-Retrieve the plain-text content of a Project Gutenberg book, stripped of license boilerplate.
-
-- Strips the standard Gutenberg license header and footer — response contains only the literary work
-- Offset/limit chunking for long works: novels routinely run 500 KB–2 MB; read in manageable chunks without loading the whole file
-- Response includes `totalChars`, `offset`, `length`, and `remainingChars` for precise pagination
-- Paragraph-boundary trimming: actual returned length may be slightly less than `limit` — use `length` (not `limit`) to compute the next offset
-- Prefers UTF-8 plain text; falls back to an HTML edition converted to text
-- Refuses audio books (`media_type "Sound"`) with a clear recovery hint
-- `provenance` field carries the Gutenberg ID, title, and license URL for attribution
+- Free-text `query` matches titles and author names; `topic` matches subjects/bookshelves separately from `query`
+- Filters: `languages` (ISO 639-1 codes), `author_year_start`/`author_year_end` lifespan range, `ids` for a batch lookup by known ID list
+- `sort`: `popular` (default, by download count) or `ascending`/`descending` by Gutenberg ID
+- Paginated — up to 32 books per page; `totalCount` and `hasMore` drive further pages
+- Each result carries `has_plain_text` to pre-filter before calling `gutenberg_get_text`
+- Typed failures: `no_results`, `page_out_of_range`, `catalog_unavailable`
 
 ---
 
-### `gutenberg_browse_popular`
+### `gutenberg_get_book` <sub>tool</sub>
 
-Browse the most-downloaded Project Gutenberg books.
+- Returns the full `formats` map (MIME type → download URL) — plain text, HTML, EPUB, cover image
+- Authors, translators, and editors each carry birth/death years
+- `has_plain_text` confirms a UTF-8 plain-text format exists; `media_type` distinguishes text books from audio (`"Sound"`)
+- `summary` is the first entry of Gutendex's `summaries` array — both are `null`/empty when Gutendex has none
+- Typed failures: `not_found`, `catalog_unavailable`
 
-- Returns up to 32 titles ordered by download count (most popular first)
-- Optionally filter by language (ISO 639-1 codes) and/or topic keyword
-- Useful as a discovery entry point: "what are the most popular classics in French?"
-- `totalInCatalog` provides full context — "top 20 of 60,000"
+---
+
+### `gutenberg_get_text` <sub>tool</sub>
+
+- `offset`/`limit` chunking (limit 1–50,000, default 20,000) for works that routinely run 500KB–2MB
+- Strips the standard Gutenberg license header and footer before chunking
+- Prefers UTF-8 plain text; falls back to an HTML-to-text conversion (`sourceFormat` reports which)
+- Response carries `totalChars`, `length`, `remainingChars`, `hasMore` — use `length`, not `limit`, to compute the next `offset`, since paragraph-boundary trimming can return slightly less than requested
+- `provenance` carries the Gutenberg ID, title, and license URL for attribution
+- Typed failures: `not_found`, `audio_book` (refuses `media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_fetch_failed`, `catalog_unavailable`
+
+---
+
+### `gutenberg_browse_popular` <sub>tool</sub>
+
+- Returns up to 32 titles (`limit`, default 20) ordered by download count, most popular first
+- Optional `languages` and `topic` filters, applied together
+- `totalInCatalog` gives full context (e.g. "top 20 of 60,000")
+- Enrichment reports whether results were truncated and the download-count ceiling of the least-popular book shown, pointing to `gutenberg_search_books` to page through the rest
+- Typed failures: `no_results`, `catalog_unavailable`
 
 ---
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats with recovery hints
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Gutenberg-specific:
 
-Project Gutenberg integration:
-
-- Catalog search and metadata via [Gutendex](https://gutendex.com/) — an unofficial but stable JSON API over the Gutenberg dataset
-- Full plain-text retrieval from a Project Gutenberg content mirror (permits automated access) with transparent UTF-8/HTML fallback
-- Tenant-scoped text caching: book text is fetched once per tenant and served from cache for subsequent chunk reads
-- No API key required — Project Gutenberg data is freely available; no registration needed
+- Catalog search and metadata via [Gutendex](https://gutendex.com/), an unofficial but stable JSON API over the Gutenberg dataset
+- Single-book lookups (`gutenberg_get_book`, `gutenberg_get_text`) read from a local SQLite+FTS5 catalog mirror when it holds the record, falling back to the live Gutendex API otherwise
+- Full plain-text retrieval from a Project Gutenberg content mirror that permits automated access, with transparent UTF-8/HTML fallback
+- Tenant-scoped text caching — book text is fetched once per tenant and served from cache for subsequent chunk reads
+- No API key required
 
 Agent-friendly output:
 
-- `has_plain_text` flag on every search/browse result so agents can pre-filter before attempting text retrieval
-- Precise chunking contract: `offset`, `length`, `totalChars`, `remainingChars`, `hasMore` on every `gutenberg_get_text` response for reliable sequential reads
-- `provenance` field on every text response for attribution
-- Discriminated `sourceFormat` field (`text/plain; charset=utf-8`, `text/html`) so agents know the fidelity of the text
+- `has_plain_text` flag on every search/browse result lets agents pre-filter before attempting text retrieval
+- Precise chunking contract on `gutenberg_get_text` — `offset`, `length`, `totalChars`, `remainingChars`, `hasMore` for reliable sequential reads
+- `provenance` and discriminated `sourceFormat` fields on every text response, for attribution and fidelity awareness
+- `gutenberg_browse_popular` enrichment reports truncation state and the download-count ceiling of omitted results
 
 ---
 
@@ -238,7 +228,7 @@ cp .env.example .env
 | `GUTENDEX_BASE_URL` | Base URL for the Gutendex catalog API. Override for self-hosted instances. | `https://gutendex.com/books/` |
 | `GUTENBERG_TEXT_BASE_URL` | Base URL for a Project Gutenberg content mirror serving the `/cache/epub` file tree. Override to use a different mirror. | `https://gutenberg.pglaf.org` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. The schema default `auto` resolves to stateful. | `stateless` |
+| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. Overrides the `stateless` posture the server declares in `createApp()`. | `stateless` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
@@ -287,12 +277,13 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 
 ## Project structure
 
-| Path | Purpose |
-|:-----|:--------|
+| Directory | Purpose |
+|:----------|:--------|
 | `src/index.ts` | `createApp()` entry point — registers tools and inits services. |
 | `src/config/server-config.ts` | Server-specific environment variable parsing (Gutendex and file-server URL overrides). |
 | `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). |
 | `src/services/gutendex/` | Gutendex catalog API client — search and book metadata. |
+| `src/services/catalog-mirror/` | Local SQLite+FTS5 catalog mirror — RDF ingestion and read helpers. |
 | `src/services/gutenberg-text/` | Full plain-text retrieval, boilerplate stripping, tenant-scoped caching, and chunking. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
@@ -311,7 +302,7 @@ See [`CLAUDE.md`](./CLAUDE.md) / [`AGENTS.md`](./AGENTS.md) for development guid
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
@@ -320,8 +311,12 @@ bun run test
 
 ---
 
+## Data attribution
+
+Data from [Project Gutenberg](https://www.gutenberg.org/) is in the public domain. Catalog metadata sourced from [Gutendex](https://gutendex.com/) (MIT license).
+
+---
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) for details.
-
-Data from [Project Gutenberg](https://www.gutenberg.org/) is in the public domain. Catalog metadata sourced from [Gutendex](https://gutendex.com/) (MIT license).
