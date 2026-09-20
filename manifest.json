@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "gutenberg-mcp-server",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "license": "Apache-2.0",
   "description": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },

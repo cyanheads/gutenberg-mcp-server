@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-09-20 · 🛡️ Security
+
+Adds a local SQLite+FTS5 catalog mirror for gutenberg_get_book/gutenberg_get_text, fixes a double-decoded HTML entity in the HTML-fallback text path, and adopts mcp-ts-core 0.13.6.
+
 ## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-08-22
 
 Fixes gutenberg_browse_popular enrichment validation, a mirror-URL leak in text_fetch_failed, omitted empty/null fields in formatted output, dropped editors and summaries, unbounded retry ladders, and operator-URL leaks through ctx.log.

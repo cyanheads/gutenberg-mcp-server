@@ -1,6 +1,6 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-08-22 23:35:34
+Generated on: 2026-09-20 13:59:45
 
 ```text
 gutenberg-mcp-server/
@@ -14,6 +14,8 @@ gutenberg-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -27,23 +29,7 @@ gutenberg-mcp-server/
 ├── docs/
 │   ├── design.md
 │   └── idea.md
-├── scripts/
-│   ├── build-changelog.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -114,6 +100,8 @@ gutenberg-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -128,6 +116,26 @@ gutenberg-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── scripts/
+│   ├── _mirror-context.ts
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── catalog-mirror-init.ts
+│   ├── catalog-mirror-refresh.ts
+│   ├── catalog-mirror-verify.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -143,6 +151,11 @@ gutenberg-mcp-server/
 │   │           ├── gutenberg-get-text.tool.ts
 │   │           └── gutenberg-search-books.tool.ts
 │   ├── services/
+│   │   ├── catalog-mirror/
+│   │   │   ├── catalog-mirror-service.ts
+│   │   │   ├── catalog-mirror-store.ts
+│   │   │   ├── rdf-archive-stream.ts
+│   │   │   └── rdf-book-parser.ts
 │   │   ├── gutenberg-text/
 │   │   │   ├── gutenberg-text-service.ts
 │   │   │   └── types.ts
@@ -152,12 +165,37 @@ gutenberg-mcp-server/
 │   │   └── upstream-deadline.ts
 │   └── index.ts
 ├── tests/
+│   ├── fixtures/
+│   │   └── catalog-mirror/
+│   │       ├── gutendex/
+│   │       │   ├── 10001.json
+│   │       │   ├── 10056.json
+│   │       │   ├── 45304.json
+│   │       │   └── 84.json
+│   │       ├── rdf/
+│   │       │   ├── pg1000.rdf
+│   │       │   ├── pg10001.rdf
+│   │       │   ├── pg10056.rdf
+│   │       │   ├── pg10137.rdf
+│   │       │   ├── pg1073.rdf
+│   │       │   ├── pg1399.rdf
+│   │       │   ├── pg45304.rdf
+│   │       │   └── pg84.rdf
+│   │       ├── catalog-sample-updated.tar.bz2
+│   │       └── catalog-sample.tar.bz2
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/
+│   │   ├── catalog-mirror/
+│   │   │   ├── archive-server.ts
+│   │   │   ├── catalog-mirror-service.test.ts
+│   │   │   ├── catalog-mirror-store.test.ts
+│   │   │   ├── rdf-archive-stream.test.ts
+│   │   │   └── rdf-book-parser.test.ts
 │   │   ├── gutenberg-text/
 │   │   │   └── gutenberg-text-service.test.ts
 │   │   ├── gutendex/
+│   │   │   ├── gutendex-mirror-read-path.test.ts
 │   │   │   └── gutendex-service.test.ts
 │   │   └── upstream-deadline.test.ts
 │   └── tools/
@@ -186,6 +224,7 @@ gutenberg-mcp-server/
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
+├── tsconfig.scripts-check.json
 └── vitest.config.ts
 ```
 

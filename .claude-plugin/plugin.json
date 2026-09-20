@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "gutenberg-mcp-server",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
