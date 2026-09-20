@@ -139,6 +139,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       recovery:
         'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
 

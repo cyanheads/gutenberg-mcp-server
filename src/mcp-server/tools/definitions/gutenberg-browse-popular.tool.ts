@@ -137,6 +137,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       recovery:
         'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a narrower filter will not help.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
 

@@ -142,6 +142,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       recovery:
         'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
 

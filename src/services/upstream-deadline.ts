@@ -38,10 +38,11 @@ export interface UpstreamDeadlineOptions {
 /**
  * Runs an upstream ladder under a shared deadline and normalizes its failure.
  *
- * `RetryOptions` carries no elapsed-time field, and a ceiling checked only
- * between attempts still overshoots by a whole in-flight attempt — so the bound
- * has to be an `AbortSignal` the fetch itself honors. The signal handed to `run`
- * composes this deadline with `ctx.signal` and must be passed to **both**
+ * `RetryOptions` has carried its own `deadlineMs` since framework 0.13.4, so the
+ * budget alone is no longer what this helper is for: it also composes the budget
+ * with `ctx.signal` into the one signal the ladder and the fetch share, and
+ * normalizes an exhausted ladder onto the calling tool's declared contract
+ * reason. The signal handed to `run` must be passed to **both**
  * `withRetry({ signal })` and `fetchWithTimeout(..., { signal })`, or the
  * deadline expires while the request it was meant to cancel keeps running.
  *

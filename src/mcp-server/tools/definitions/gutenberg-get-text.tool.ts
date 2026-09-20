@@ -113,6 +113,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       recovery:
         'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'catalog_unavailable',
@@ -121,6 +122,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       recovery:
         'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry in a few seconds, or call gutenberg_get_book to confirm the catalog is answering again.',
       retryable: true,
+      thrownBy: 'service',
     },
   ],
 
