@@ -1,0 +1,72 @@
+{
+  "id": 10056,
+  "title": "Chinese literature : $b Comprising the Analects of Confucius, the Sayings of Mencius, the Shi-King, the Travels of Fâ-Hien, and the Sorrows of Han",
+  "authors": [
+    {
+      "name": "Faxian",
+      "birth_year": null,
+      "death_year": null
+    },
+    {
+      "name": "Confucius",
+      "birth_year": -551,
+      "death_year": -479
+    },
+    {
+      "name": "Mencius",
+      "birth_year": -385,
+      "death_year": -289
+    }
+  ],
+  "summaries": [
+    "\"Chinese Literature: Comprising the Analects of Confucius, the Sayings of Mencius, the Shi-King, the Travels of Fâ-Hien, and the Sorrows of Han\" by Epiphanius Wilson is a comprehensive collection of key works from Chinese literature likely compiled in the early 20th century. This anthology includes influential texts that delve into the philosophical underpinnings of Confucian thought, moral principles, and socio-political insights from notable figures such as Confucius and Mencius, along with historical narratives and poetry.  The opening of this compilation introduces readers to \"The Analects of Confucius,\" featuring an in-depth look at Confucius’s teachings and reflections on morality, governance, and personal development. It explores themes such as the importance of learning, filial piety, and virtuous living, using a dialogue format between Confucius and his disciples. Early passages highlight Confucius's focus on ethical conduct and social harmony, showcasing his belief in the significance of education and the role of virtue in leadership. This section sets the stage for a deeper exploration of the values that underpin Chinese culture and governance, making it a significant read for those interested in philosophy, ethics, or Eastern literature. (This is an automatically generated summary.)"
+  ],
+  "editors": [
+    {
+      "name": "Wilson, Epiphanius",
+      "birth_year": 1845,
+      "death_year": 1916
+    }
+  ],
+  "translators": [
+    {
+      "name": "Legge, James",
+      "birth_year": 1815,
+      "death_year": 1897
+    },
+    {
+      "name": "Davis, John Francis, Sir",
+      "birth_year": 1795,
+      "death_year": 1890
+    },
+    {
+      "name": "Jennings, William",
+      "birth_year": 1847,
+      "death_year": 1927
+    }
+  ],
+  "subjects": [
+    "China -- Literary collections",
+    "Chinese literature",
+    "Chinese literature -- Translations into English"
+  ],
+  "bookshelves": [
+    "Category: Essays, Letters & Speeches",
+    "Category: Philosophy & Ethics",
+    "Category: Poetry"
+  ],
+  "languages": ["en"],
+  "copyright": false,
+  "media_type": "Text",
+  "formats": {
+    "text/html": "https://www.gutenberg.org/ebooks/10056.html.images",
+    "application/epub+zip": "https://www.gutenberg.org/ebooks/10056.epub3.images",
+    "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/10056.kf8.images",
+    "application/rdf+xml": "https://www.gutenberg.org/ebooks/10056.rdf",
+    "image/jpeg": "https://www.gutenberg.org/cache/epub/10056/pg10056.cover.medium.jpg",
+    "application/octet-stream": "https://www.gutenberg.org/cache/epub/10056/pg10056-h.zip",
+    "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/10056.txt.utf-8",
+    "text/plain; charset=us-ascii": "https://www.gutenberg.org/files/10056/10056-0.txt"
+  },
+  "download_count": 1251
+}

@@ -3,6 +3,20 @@
 #
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
+#
+# Pinned to $BUILDPLATFORM rather than the target platform: `bun run build` emits
+# JavaScript, and only `dist/` and the mirror lifecycle scripts cross into the
+# production stage, which runs its own target-arch install. Built for the target
+# instead, the non-native leg of a `--platform linux/amd64,linux/arm64` build runs
+# under QEMU, where bun >= 1.4 aborts with a JavaScriptCore allocator assertion
+# and fails the multi-arch push.
+#
+# The constraint this assumes: the build stage produces platform-independent
+# output. A stage that compiles a native addon needs the target-arch toolchain and
+# cannot cross-compile this way. `better-sqlite3` is a dependency here but never
+# compiled in either stage — both installs pass `--ignore-scripts`, and the mirror
+# reaches SQLite through the built-in `bun:sqlite` driver on this image's runtime,
+# leaving `better-sqlite3` as the Node-only path.
 # ==============================================================================
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
@@ -79,6 +93,19 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+
+# Copy the catalog-mirror lifecycle scripts so `docker exec … bun run mirror:init`
+# works in a running container. The shared context shim is imported by all three.
+COPY --from=build /usr/src/app/scripts/catalog-mirror-init.ts \
+                  /usr/src/app/scripts/catalog-mirror-refresh.ts \
+                  /usr/src/app/scripts/catalog-mirror-verify.ts \
+                  /usr/src/app/scripts/_mirror-context.ts \
+                  ./scripts/
+
+# Bun honors tsconfig `paths` at runtime. The source tsconfig maps `@/*` to `./src/*`,
+# which never reaches this image; this one maps it to the compiled `./dist/*`, so the
+# same `bun run mirror:*` command works in a dev checkout and in the container.
+RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.

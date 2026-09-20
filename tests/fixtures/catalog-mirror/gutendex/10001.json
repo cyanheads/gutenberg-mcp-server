@@ -1,0 +1,42 @@
+{
+  "id": 10001,
+  "title": "Apocolocyntosis",
+  "authors": [
+    {
+      "name": "Seneca, Lucius Annaeus",
+      "birth_year": null,
+      "death_year": 65
+    }
+  ],
+  "summaries": [
+    "\"Apocolocyntosis\" by Lucius Annaeus Seneca is a satire likely written shortly after 54 CE. This rare surviving example of Menippean satire viciously mocks the recently deceased Emperor Claudius. The work follows Claudius's journey from death to Mount Olympus, where he seeks deification among the gods, only to face judgment for his notorious crimes. Through biting humor and wordplay, Seneca transforms the traditional apotheosis into a \"pumpkinification,\" condemning the emperor's cruelty and incompetence while exposing the corruption of his reign. (This is an automatically generated summary.)"
+  ],
+  "editors": [],
+  "translators": [
+    {
+      "name": "Rouse, W. H. D. (William Henry Denham)",
+      "birth_year": 1863,
+      "death_year": 1950
+    }
+  ],
+  "subjects": ["Claudius, Emperor of Rome, 10 B.C.-54 A.D. -- Humor"],
+  "bookshelves": [
+    "Category: Classics of Literature",
+    "Category: Humour",
+    "Category: Plays/Films/Dramas"
+  ],
+  "languages": ["en"],
+  "copyright": false,
+  "media_type": "Text",
+  "formats": {
+    "text/html": "https://www.gutenberg.org/ebooks/10001.html.images",
+    "application/epub+zip": "https://www.gutenberg.org/ebooks/10001.epub3.images",
+    "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/10001.kf8.images",
+    "application/rdf+xml": "https://www.gutenberg.org/ebooks/10001.rdf",
+    "image/jpeg": "https://www.gutenberg.org/cache/epub/10001/pg10001.cover.medium.jpg",
+    "application/octet-stream": "https://www.gutenberg.org/cache/epub/10001/pg10001-h.zip",
+    "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/10001.txt.utf-8",
+    "text/plain; charset=us-ascii": "https://www.gutenberg.org/files/10001/10001-0.txt"
+  },
+  "download_count": 1284
+}

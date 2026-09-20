@@ -17,8 +17,9 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
-import { GutendexService, hasPlainText } from '@/services/gutendex/gutendex-service.js';
+import { GutendexService } from '@/services/gutendex/gutendex-service.js';
 import type { RawBook } from '@/services/gutendex/types.js';
+import { hasPlainText } from '@/services/gutendex/types.js';
 
 /** Build a minimal RawBook, overriding only the fields a case cares about. */
 function makeRawBook(overrides: Partial<RawBook>): RawBook {
@@ -98,6 +99,7 @@ function makeService(): GutendexService {
   return new GutendexService({} as AppConfig, createInMemoryStorage(), {
     gutendexBaseUrl: CATALOG_BASE,
     gutenbergTextBaseUrl: 'https://mirror.test',
+    mirrorPath: ':memory:',
   });
 }
 

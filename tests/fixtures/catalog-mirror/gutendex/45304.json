@@ -1,0 +1,41 @@
+{
+  "id": 45304,
+  "title": "The City of God, Volume I",
+  "authors": [
+    {
+      "name": "Augustine, of Hippo, Saint",
+      "birth_year": 354,
+      "death_year": 430
+    }
+  ],
+  "summaries": [
+    "\"The City of God, Volume I\" by Bishop of Hippo Saint Augustine is a work of Christian philosophy written in Latin in the early 5th century AD. Composed in response to Rome's sack by the Visigoths in 410, Augustine defends Christianity against accusations that it caused Rome's decline. He presents human history as a conflict between the Earthly City—those pursuing worldly pleasures—and the City of God—those dedicated to eternal truths. Through theological argument and historical analysis, Augustine refutes pagan religion and philosophy while expounding on suffering, evil, free will, and original sin. (This is an automatically generated summary.)"
+  ],
+  "editors": [
+    {
+      "name": "Dods, Marcus",
+      "birth_year": 1834,
+      "death_year": 1909
+    }
+  ],
+  "translators": [],
+  "subjects": ["Apologetics -- Early works to 1800", "Kingdom of God -- Early works to 1800"],
+  "bookshelves": [
+    "Category: History - Ancient",
+    "Category: Philosophy & Ethics",
+    "Category: Religion/Spirituality"
+  ],
+  "languages": ["en"],
+  "copyright": false,
+  "media_type": "Text",
+  "formats": {
+    "text/html": "https://www.gutenberg.org/ebooks/45304.html.images",
+    "application/epub+zip": "https://www.gutenberg.org/ebooks/45304.epub3.images",
+    "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/45304.kf8.images",
+    "application/rdf+xml": "https://www.gutenberg.org/ebooks/45304.rdf",
+    "image/jpeg": "https://www.gutenberg.org/cache/epub/45304/pg45304.cover.medium.jpg",
+    "application/octet-stream": "https://www.gutenberg.org/cache/epub/45304/pg45304-h.zip",
+    "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/45304.txt.utf-8"
+  },
+  "download_count": 7181
+}

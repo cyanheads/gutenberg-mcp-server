@@ -17,8 +17,16 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { getCatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
-import type { Book, RawBook, RawBooksPage, RawPerson, SearchParams } from './types.js';
+import {
+  type Book,
+  hasPlainText,
+  type RawBook,
+  type RawBooksPage,
+  type RawPerson,
+  type SearchParams,
+} from './types.js';
 
 /**
  * Hash a URL to a storage-safe key (alphanumeric only).
@@ -74,19 +82,6 @@ function normalizePerson(p: RawPerson) {
     birth_year: p.birth_year,
     death_year: p.death_year,
   };
-}
-
-/**
- * Whether gutenberg_get_text can serve this book as plain text: media_type
- * "Text" with a UTF-8 text/plain format present. US-ASCII-only entries are
- * excluded — they have no path on the sanctioned mirror and resolve to
- * no_text_format — so the flag never advertises text the reader tool can't
- * deliver. (HTML-fallback-only books are likewise not counted here; the flag
- * tracks plain-text availability, not HTML-derived readability.)
- */
-export function hasPlainText(book: RawBook): boolean {
-  if (book.media_type !== 'Text') return false;
-  return 'text/plain; charset=utf-8' in book.formats;
 }
 
 function normalizeBook(raw: RawBook): Book {
@@ -227,8 +222,46 @@ export class GutendexService {
     };
   }
 
-  /** Fetch a single book by Gutenberg ID. Throws not_found if 404. */
+  /**
+   * Read one book from the local catalog mirror, or `null` when the mirror cannot
+   * answer — not ready, does not hold the ID, or unreadable.
+   *
+   * A miss is deliberately indistinguishable from a cold mirror: both mean "ask the
+   * upstream". The mirror is a daily snapshot, so a book published or revised since
+   * the last harvest is legitimately absent, and treating that as `not_found` would
+   * turn a staleness window into a wrong answer.
+   *
+   * A mirror fault is downgraded to a miss rather than propagated. The mirror is an
+   * availability optimization layered under a working live path; a corrupt database
+   * or a missing file should cost latency, never correctness.
+   */
+  private async mirrorBook(id: number, ctx: Context): Promise<Book | null> {
+    try {
+      const mirror = getCatalogMirrorService();
+      if (!(await mirror.ready())) return null;
+      const [book] = await mirror.getBooks([id]);
+      return book ?? null;
+    } catch (err: unknown) {
+      ctx.log.debug('Catalog mirror unavailable; falling back to the live catalog', {
+        id,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch a single book by Gutenberg ID. Serves from the local mirror when it holds
+   * the record, and falls through to the live catalog otherwise. Throws not_found if
+   * the live lookup 404s.
+   */
   async getBook(id: number, ctx: Context): Promise<Book> {
+    const mirrored = await this.mirrorBook(id, ctx);
+    if (mirrored !== null) {
+      ctx.log.debug('Catalog mirror hit', { id });
+      return mirrored;
+    }
+
     const url = `${this.baseUrl}${id}/`;
     const cacheKey = `gutendex/book/${id}`;
 

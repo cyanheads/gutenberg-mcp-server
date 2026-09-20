@@ -32,6 +32,7 @@ dist/
 *.tsbuildinfo
 .tsbuildinfo
 .tsbuildinfo.scripts
+.tsbuildinfo.scripts-check
 *.js.map
 *.d.ts.map
 *.tgz
@@ -55,6 +56,7 @@ logs/
 # =============================================================================
 .cache/
 .parcel-cache/
+.scratch/
 
 # =============================================================================
 # ENVIRONMENT & CONFIGURATION
@@ -69,6 +71,7 @@ worker-configuration.d.ts
 # APPLICATION SPECIFIC
 # =============================================================================
 .storage/
+.mirror/
 repomix-output*
 /data/
 docs/api/

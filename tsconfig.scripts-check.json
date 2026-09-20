@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "tsBuildInfoFile": ".tsbuildinfo.scripts-check" },
+  "include": ["src/**/*", "scripts/catalog-mirror-*.ts", "scripts/_mirror-context.ts"]
+}
