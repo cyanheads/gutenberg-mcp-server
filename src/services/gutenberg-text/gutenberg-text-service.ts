@@ -62,20 +62,39 @@ function normalizeWhitespace(text: string): string {
 }
 
 /**
- * Minimal HTML-to-text conversion: strips tags, decodes common HTML entities,
+ * Named character references this converter resolves; anything else is prose furniture.
+ * A `Map` rather than an object literal: the reference name comes from the book text, so
+ * a plain object would resolve `&constructor;` off `Object.prototype` and splice a
+ * stringified native function into the reader's chunk.
+ */
+const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
+  ['amp', '&'],
+  ['apos', "'"],
+  ['gt', '>'],
+  ['lt', '<'],
+  ['quot', '"'],
+]);
+
+/**
+ * Matches one decimal numeric reference or one lowercase named reference.
+ * Decoding every reference in a single pass is what keeps each one decoded
+ * exactly once: a sequential `&amp;` → `&` replacement followed by `&lt;` → `<`
+ * re-decodes the ampersand it just produced, so `&amp;lt;` — prose meaning the
+ * literal text `&lt;` — would collapse to `<`.
+ */
+const ENTITY_RE = /&(?:#(\d+)|([a-z]+));/g;
+
+/**
+ * Minimal HTML-to-text conversion: strips tags, decodes character references,
  * and preserves paragraph structure.
  */
 function htmlToText(html: string): string {
   return html
     .replace(/<\/?(?:p|div|h[1-6]|hr|br)\b[^>]*>/gi, '\n\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/&[a-z]+;/g, ' ');
+    .replace(ENTITY_RE, (_match, decimal: string | undefined, name: string | undefined) =>
+      name === undefined ? String.fromCharCode(Number(decimal)) : (NAMED_ENTITIES.get(name) ?? ' '),
+    );
 }
 
 /**

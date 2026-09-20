@@ -29,6 +29,7 @@ function makeService(): GutenbergTextService {
   return new GutenbergTextService({} as AppConfig, createInMemoryStorage(), {
     gutendexBaseUrl: 'https://catalog.test/books/',
     gutenbergTextBaseUrl: MIRROR_HOST,
+    mirrorPath: ':memory:',
   });
 }
 
@@ -68,6 +69,31 @@ const MIRROR_FILE = [
   'It is a truth universally acknowledged.',
   '*** END OF THE PROJECT GUTENBERG EBOOK PRIDE AND PREJUDICE ***',
   'License boilerplate.',
+].join('\n');
+
+/** The HTML cache path resolveTextUrl derives for a book with no plain-text format. */
+const RESOLVED_HTML_URL = `${MIRROR_HOST}/cache/epub/${BOOK_ID}/pg${BOOK_ID}-images.html`;
+
+/** Same book, but only the mirror's generated HTML is on offer — the htmlToText path. */
+const htmlOnlyBook: Book = {
+  ...book,
+  formats: { 'text/html': 'https://www.gutenberg.org/ebooks/1342.html.images' },
+  has_plain_text: false,
+};
+
+/**
+ * An HTML book whose prose carries both plain character references and references
+ * that are themselves escaped — `&amp;lt;` is the four characters `&lt;`, not `<`.
+ */
+const MIRROR_HTML_FILE = [
+  '<html><body>',
+  '<p>*** START OF THE PROJECT GUTENBERG EBOOK PRIDE AND PREJUDICE ***</p>',
+  '<p>Tom &amp; Jerry wrote &amp;lt;b&amp;gt; on the slate.</p>',
+  '<p>Markup: &lt;em&gt;, quote: &quot;yes&quot;, apostrophe: &apos;tis, numeric: &#65;.</p>',
+  '<p>Unknown:&nbsp;entity.</p>',
+  '<p>Prototype:&constructor;entity.</p>',
+  '<p>*** END OF THE PROJECT GUTENBERG EBOOK PRIDE AND PREJUDICE ***</p>',
+  '</body></html>',
 ].join('\n');
 
 describe('GutenbergTextService — mirror ladder', () => {
@@ -239,5 +265,56 @@ describe('GutenbergTextService — log payload disclosure', () => {
     expect(http.calls).toHaveLength(1);
     const payloads = JSON.stringify((ctx.log as MockContextLogger).calls);
     expect(payloads).not.toContain(MIRROR_HOST);
+  });
+});
+
+// ── HTML entity decoding on the text/html fallback (#16) ─────────────────────
+
+describe('GutenbergTextService — HTML entity decoding', () => {
+  let http: FetchMockHarness;
+
+  /** Fetch the HTML-only book through the real pipeline and return its stripped text. */
+  async function readHtmlBook(): Promise<string> {
+    http.route({ match: RESOLVED_HTML_URL, respond: () => new Response(MIRROR_HTML_FILE) });
+    const ctx = createMockContext({ errors: gutenbergGetText.errors });
+    const entry = await makeService().fetchAndCacheText(htmlOnlyBook, BOOK_ID, ctx);
+    expect(entry.sourceFormat).toBe('text/html');
+    return entry.text;
+  }
+
+  beforeEach(() => {
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+  });
+
+  it('decodes each character reference exactly once, so an escaped reference stays text', async () => {
+    const text = await readHtmlBook();
+
+    // `&amp;lt;b&amp;gt;` is prose *about* markup — the reference the first
+    // decode uncovers must not be decoded a second time into a real tag.
+    expect(text).toContain('Tom & Jerry wrote &lt;b&gt; on the slate.');
+    expect(text).not.toContain('<b>');
+  });
+
+  it('keeps decoding every reference form it handled before', async () => {
+    const text = await readHtmlBook();
+
+    expect(text).toContain('Markup: <em>, quote: "yes", apostrophe: \'tis, numeric: A.');
+    // A named reference outside the table still collapses to a space.
+    expect(text).toContain('Unknown: entity.');
+  });
+
+  it('treats a reference naming an Object prototype member as unknown', async () => {
+    const text = await readHtmlBook();
+
+    // `&constructor;` is a name, not a lookup into the prototype chain — a
+    // plain-object table would resolve it and stringify a native function
+    // into the reader's book text.
+    expect(text).toContain('Prototype: entity.');
+    expect(text).not.toContain('native code');
   });
 });
