@@ -373,6 +373,22 @@ describe('gutenbergGetText — error paths', () => {
     });
   });
 
+  it('carries the declared audio_book recovery hint to the wire without a throw-site forward', async () => {
+    mockGutendexService.getBook.mockResolvedValue(audioBook);
+
+    const result = await runToolContract(gutenbergGetText, { id: 55555 });
+    const structured = result.structuredContent as {
+      error: { code: number; data?: Record<string, unknown> };
+    };
+    const audioEntry = gutenbergGetText.errors?.find((e) => e.reason === 'audio_book');
+
+    expect(result.isError).toBe(true);
+    expect(structured.error.data).toMatchObject({
+      reason: 'audio_book',
+      recovery: { hint: audioEntry?.recovery },
+    });
+  });
+
   it('throws ctx.fail("no_text_format") when no readable format exists', async () => {
     const epubOnlyBook = {
       ...textBook,

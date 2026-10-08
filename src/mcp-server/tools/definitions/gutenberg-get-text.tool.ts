@@ -134,9 +134,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .getBook(input.id, ctx)
       .catch((err: unknown) => {
         if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-          throw ctx.fail('not_found', `No book found with Gutenberg ID ${input.id}.`, {
-            ...ctx.recoveryFor('not_found'),
-          });
+          throw ctx.fail('not_found', `No book found with Gutenberg ID ${input.id}.`);
         }
         throw err;
       });
@@ -146,7 +144,6 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       throw ctx.fail(
         'audio_book',
         `Book ${input.id} is an audio recording (media_type "Sound") — no literary text is available.`,
-        { ...ctx.recoveryFor('audio_book') },
       );
     }
 
@@ -172,7 +169,6 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       throw ctx.fail(
         'offset_out_of_range',
         `Offset ${input.offset} is past the end of the book (totalChars: ${cached.text.length}).`,
-        { ...ctx.recoveryFor('offset_out_of_range') },
       );
     }
 

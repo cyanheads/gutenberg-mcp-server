@@ -158,9 +158,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     );
 
     if (result.books.length === 0) {
-      throw ctx.fail('no_results', 'No books matched the filter criteria.', {
-        ...ctx.recoveryFor('no_results'),
-      });
+      throw ctx.fail('no_results', 'No books matched the filter criteria.');
     }
 
     const limited = result.books.slice(0, input.limit);

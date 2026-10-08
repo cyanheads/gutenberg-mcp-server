@@ -188,9 +188,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       });
 
     if (result.books.length === 0) {
-      throw ctx.fail('no_results', 'No books matched the search criteria.', {
-        ...ctx.recoveryFor('no_results'),
-      });
+      throw ctx.fail('no_results', 'No books matched the search criteria.');
     }
 
     return {
