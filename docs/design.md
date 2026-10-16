@@ -146,12 +146,6 @@ tool('gutenberg_search_books', {
       recovery: 'Broaden the search — try fewer or different query words, remove language filters, or check the topic spelling.',
     },
     {
-      reason: 'invalid_language',
-      code: JsonRpcErrorCode.InvalidParams,
-      when: 'A language code is not a valid two-character ISO 639-1 code.',
-      recovery: 'Use two-character language codes such as "en", "fr", "de", "es", "it", "pt", "nl", "fi", "ru".',
-    },
-    {
       reason: 'page_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The requested page number is past the last page of results for this query.',
@@ -209,7 +203,7 @@ tool('gutenberg_get_book', {
     is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
     summary: z.string().nullable().describe('First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.'),
     summaries: z.array(z.string()).describe('Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.'),
-    formats: z.record(z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
+    formats: z.record(z.string(), z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
     has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; HTML-only editions may have is_readable=true.'),
   }),
 
@@ -247,7 +241,7 @@ tool('gutenberg_get_text', {
     id: z.number().int().positive()
       .describe('Project Gutenberg book ID. Use gutenberg_search_books or gutenberg_get_book to find IDs. Example: 1342 for Pride and Prejudice, 2600 for War and Peace, 84 for Frankenstein.'),
     offset: z.number().int().min(0).default(0)
-      .describe('Character offset into the stripped literary text (after boilerplate removal) at which to start reading. 0 returns the beginning of the work. Use the remainingChars field from a prior response to determine whether to continue paging. Offsets are byte-stable within a release — re-fetching the same offset always returns the same content.'),
+      .describe('Character offset into the stripped literary text (after boilerplate removal). 0 returns the beginning. Continue at the prior offset + length; the upstream work can change after the cached text expires.'),
     limit: z.number().int().min(1).default(20000)
       .describe('Requested character limit, capped locally at 50,000. Paragraph trimming may return less; continue at offset + length.'),
   }),
@@ -277,7 +271,7 @@ tool('gutenberg_get_text', {
     },
     {
       reason: 'audio_book',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The book is an audio recording (media_type "Sound"), not a text book — no literary plain text is available.',
       recovery: 'This Gutenberg entry is an audio book. Use gutenberg_search_books or gutenberg_get_book to find a text edition of the same work, then call gutenberg_get_text on that ID.',
     },
@@ -289,7 +283,7 @@ tool('gutenberg_get_text', {
     },
     {
       reason: 'offset_out_of_range',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The offset is greater than or equal to totalChars (past the end of the book).',
       recovery: 'Use an offset less than totalChars. A prior response\'s remainingChars field shows how much text is left.',
     },
@@ -377,18 +371,15 @@ This section specifies `gutenberg_get_text`'s text-processing pipeline. It is th
                                 raw format URL: .../cache/epub/N/pgN.txt for utf-8,
                                 .../cache/epub/N/pgN-images.html for the html fallback;
                                 30s timeout
-3. Strip BOM                  — remove leading \xEF\xBB\xBF if present (utf-8 files only)
-4. Decode as UTF-8             — the mirror serves generated UTF-8 bytes for both the
-                                plain-text and HTML cache files; no per-format decode branch
-5. Extract literary content   — find "*** START OF THE PROJECT GUTENBERG EBOOK … ***"
-                                and "*** END OF THE PROJECT GUTENBERG EBOOK … ***";
-                                extract everything between them (exclusive);
-                                throw no_text_format if neither marker is found
-6. Normalize whitespace       — all Gutenberg plain-text files use CRLF line endings;
-                                normalize CRLF→LF first; then collapse 3+ consecutive
-                                blank lines to 2
-7. HTML→text if needed        — when sourceFormat is text/html: strip tags, decode
-                                HTML entities, preserve paragraph breaks as double-newlines
+3. Decode as UTF-8             — the mirror serves generated UTF-8 bytes for both formats;
+                                reject recognized invalid documents, not content headers alone
+4. Strip BOM                  — remove a leading decoded UTF-8 BOM if present
+5. HTML→text if needed        — tokenize once, decode character references once, exclude
+                                metadata/template content, preserve block and table boundaries
+6. Normalize whitespace       — normalize CRLF→LF and collapse 3+ consecutive newlines to 2
+7. Extract literary content   — extract between complete START/END marker lines when present;
+                                otherwise retain the processed text; reject empty documents
+                                and recognized whole-document failure templates before caching
 8. Apply offset/limit         — slice the resulting string at [offset : offset + limit];
                                 trim the trailing cut to the last paragraph break within
                                 500 chars of the limit to avoid mid-paragraph cuts
@@ -405,17 +396,17 @@ The `*** START ***` marker appears at line 27 for Pride and Prejudice (UTF-8 fil
 /^\*{3} END OF THE PROJECT GUTENBERG EBOOK .+? \*{3}$/m
 ```
 
-Files use CRLF (`\r\n`) line endings, so marker lines end with `\r` before `\n`. JavaScript multiline `$` matches before `\n` (after consuming the `\r` into `.+?`). The `\r` at the end of the captured title text is harmless; the extraction uses only the match's index position for the split point. Strip CRLF→LF before any further processing (step 6).
+CRLF (`\r\n`) line endings are normalized to LF before matching marker lines (step 6), so extraction does not depend on carriage-return handling in the regular expressions.
 
 The header above `*** START ***` in UTF-8 files contains: title, author, release date, most-recently-updated date, language, credits — all already in the catalog record. The footer below `*** END ***` is the full Project Gutenberg license (verified: ~350 lines for Pride and Prejudice). Strip it entirely. The provenance note in the response covers the legal attribution obligation.
 
 ### Soft line-break trimming
 
-Rather than cutting at exactly `offset + limit` characters, find the last `\n\n` (paragraph break) within 500 characters before the limit. If found, cut there. This ensures the agent always receives complete paragraphs and can continue with the next `\n\n`-bounded unit at the next offset. Cap the backtrack at 500 characters to prevent pathological cases in poetry or dialogue where paragraphs are very short.
+Rather than cutting at exactly `offset + limit` characters, find the last `\n\n` (paragraph break) within 500 characters before the limit. If found, cut there; otherwise retain the bounded slice even if it ends mid-paragraph. Continue at `offset + length` in either case.
 
 ### Caching
 
-Full-text files are static for months or years. Cache the extracted (stripped, normalized) text in-process keyed by Gutenberg ID, with a 24-hour TTL. The cache stores the full stripped text as a string; the chunking is applied per-request after cache lookup. Memory budget: War and Peace ~3MB uncompressed, typical novel ~500KB; 100 cached novels ≈ 50MB worst-case — acceptable for a process with no other significant state.
+Cache the extracted (stripped, normalized) text through tenant-scoped storage at `gutenberg/text/v2/{id}`, with a 24-hour TTL. Chunking runs after cache lookup. Fetching and processing still buffer the whole book in memory; there is no document-size cap or synchronous parsing deadline.
 
 ### HTML fallback
 
