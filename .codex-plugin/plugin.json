@@ -1,7 +1,7 @@
 {
   "name": "gutenberg-mcp-server",
   "version": "0.1.10",
-  "description": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
+  "description": "Search, browse, and read 78,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -14,8 +14,8 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "gutenberg-mcp-server",
-    "shortDescription": "Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "Access 75,000+ public-domain books from Project Gutenberg. Search by title, author, language, topic, or popularity. Retrieve full plain text with offset/limit chunking for context-budget management. No API key required.",
+    "shortDescription": "Search, browse, and read 78,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.",
+    "longDescription": "Access 78,000+ public-domain books from Project Gutenberg. Search by title, author, language, topic, or popularity. Retrieve full plain text with offset/limit chunking for context-budget management. No API key required.",
     "developerName": "cyanheads",
     "category": "Research",
     "capabilities": ["Read"],
