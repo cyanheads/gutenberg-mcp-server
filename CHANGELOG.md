@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-10-16
+
+Preserve literary text fidelity and expose readable editions with source bibliographic notes.
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-10-08
 
 Adopts mcp-ts-core 0.13.14: tool error results carry a requestId and no longer expose stack traces or request context in error data, numeric-string arguments are repaired before validation, and the Docker image moves to Bun 1.4.2 with a cross-platform deps stage.
