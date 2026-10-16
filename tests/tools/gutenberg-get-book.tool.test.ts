@@ -38,6 +38,8 @@ const mockBook = {
     'application/epub+zip': 'https://www.gutenberg.org/ebooks/1342.epub.noimages',
   },
   has_plain_text: true,
+  is_readable: true,
+  source_notes: null,
 };
 
 beforeEach(() => {
@@ -45,6 +47,37 @@ beforeEach(() => {
 });
 
 describe('gutenbergGetBook', () => {
+  it.each([null, [], ['See #41445 (1818 ed.) and #42324 (1831 ed.).']])(
+    'preserves source notes %j on both surfaces',
+    async (source_notes) => {
+      mockGutendexService.getBook.mockResolvedValue({
+        ...mockBook,
+        source_notes,
+        is_readable: true,
+        has_plain_text: false,
+        formats: { 'text/html': 'https://example/book.html' },
+      });
+      const result = await runToolContract(gutenbergGetBook, { id: 84 });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        source_notes,
+        is_readable: true,
+        has_plain_text: false,
+        download_count: 75000,
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('Readable:');
+      expect(text).toContain('last 30 days');
+      expect(text).toContain('source snapshot');
+      expect(text).toContain(
+        source_notes === null
+          ? 'Source notes:** Not available'
+          : source_notes.length === 0
+            ? 'Source notes:** None'
+            : source_notes[0],
+      );
+    },
+  );
   it('returns the full book record for a valid ID', async () => {
     mockGutendexService.getBook.mockResolvedValue(mockBook);
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
@@ -176,6 +209,8 @@ describe('gutenbergGetBook', () => {
         'text/html': 'https://www.gutenberg.org/ebooks/1342.html',
       },
       has_plain_text: true,
+      is_readable: true,
+      source_notes: null,
     };
 
     it('renders title, ID, authors, subjects, and formats', () => {

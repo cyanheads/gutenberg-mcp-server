@@ -1,6 +1,6 @@
 # gutenberg-mcp-server — idea
 
-Project Gutenberg's 75,000+ public-domain ebooks — searchable by author, title, subject, or language, with retrieval of the **actual full text**. The catalog comes from the keyless Gutendex API; the readable content from Gutenberg's plain-text files.
+Project Gutenberg's 78,000+ public-domain ebooks — searchable by author, title, subject, or language, with retrieval of the **actual full text**. The catalog comes from the keyless Gutendex API; the readable content from Gutenberg's plain-text files.
 
 Where book-metadata sources return editions, ISBNs, and covers, this returns the complete works of out-of-copyright literature — ready for an agent to read, quote, or analyze. "Get me the full text of *Pride and Prejudice*" is the target capability.
 
@@ -24,7 +24,7 @@ Gutendex (keyless JSON over the Project Gutenberg catalog) for search/metadata; 
 | `gutendex.com/books/{id}` | One book's record | Title, authors, subjects, bookshelves, languages, download_count, `formats` map |
 | `formats[...]` URLs | Content files | `text/plain`, `text/html`, `application/epub+zip`, etc. — full text lives here |
 
-Each record's `formats` map points at the actual files (plain text, HTML, EPUB). The plain-text URL is what `gutenberg_get_text` fetches and returns.
+Each record's `formats` map advertises formats (plain text, HTML, EPUB). `gutenberg_get_text` derives its UTF-8 or HTML mirror path from the Gutenberg ID instead of fetching the advertised main-site URL.
 
 ## Tool Surface (sketch)
 
@@ -55,10 +55,10 @@ gutenberg_browse_popular — top books by download_count, optionally by language
 - Low complexity — clean keyless REST + plain-text fetch. The only real design work is **full-text handling**: novels are large, so `gutenberg_get_text` needs offset/limit (and ideally chapter-aware) chunking with clear "more remaining" signals, never a silent truncation.
 - **Strip the boilerplate.** Gutenberg files carry a standard license header/footer; remove it so the agent gets the work, not the legal preamble — but keep a one-line provenance + license note in the response metadata.
 - Prefer `text/plain; charset=utf-8` formats; fall back to HTML→text when a title lacks a plain-text file. Some very old entries have quirky encodings — normalize to UTF-8.
-- `download_count` is a genuine popularity signal (real metric, not fabricated) — good for `sort=popular` and `browse_popular`.
+- `download_count` counts downloads in the last 30 days at the source snapshot — the basis for `sort=popular` and `browse_popular`.
 - Catalog is **English-heavy but multilingual** (60+ languages) — expose the `languages` filter prominently.
 - Fully keyless and cache-friendly (the public-domain corpus barely changes) — cache catalog lookups and text aggressively.
 - Composes with book-metadata servers like `openlibrary` (match a Gutenberg book to its ISBN/editions/cover), and with `wikidata`/`wikipedia` (author context and work background). The pairing with `openlibrary` is the strongest: metadata there, full text here.
 - Moonshot: a "read-and-analyze" workflow — resolve a title, stream the text in chunks, and support search-within-book (find a passage/quote) so agents can do close reading without holding the whole novel in context.
 
-**README one-liner:** "75,000+ public-domain books with full text — search the classics and actually read them."
+**README one-liner:** "78,000+ public-domain books with full text — search the classics and actually read them."

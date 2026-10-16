@@ -96,7 +96,7 @@ Each step is independently testable. The text service can be unit-tested with a 
 
 ```ts
 tool('gutenberg_search_books', {
-  description: 'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and author name with query words; filters by topic (subject or bookshelf keyword), language, author lifespan, or a specific list of Gutenberg IDs. Results are ordered by popularity (download count) by default. Returns book ID, title, authors, languages, subjects, and download count — use gutenberg_get_book for the full formats map before fetching text.',
+  description: 'Search the Project Gutenberg catalog of 78,000+ public-domain books by title, author, topic, language, author lifespan, or IDs. Popularity uses downloads in the last 30 days at the source snapshot. Use is_readable to select an edition for gutenberg_get_text.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -111,7 +111,7 @@ tool('gutenberg_search_books', {
     author_year_end: z.number().int().optional()
       .describe('Include only books with at least one author alive on or before this year. Example: author_year_start=1800 with author_year_end=1899 returns books with 19th-century authors.'),
     sort: z.enum(['popular', 'ascending', 'descending']).default('popular')
-      .describe('Result ordering. "popular" (default) sorts by download count descending — most-read classics first. "ascending" and "descending" sort by Gutenberg ID number, which correlates roughly with upload recency (lower IDs are older uploads).'),
+      .describe('Result ordering. "popular" (default) sorts by downloads in the last 30 days at the source snapshot, descending. "ascending" and "descending" sort by Gutenberg ID number.'),
     ids: z.array(z.number().int().positive()).optional()
       .describe('Narrow results to specific Gutenberg ID numbers. Other filters (search, topic, languages) still apply when ids is provided — a conflicting language filter will reduce or empty the result. Serialized as comma-separated values in the query string (e.g., ids=84,1342). Use gutenberg_get_book for single-ID lookups; this parameter suits batch pre-fetching of known IDs.'),
     page: z.number().int().positive().default(1)
@@ -129,8 +129,9 @@ tool('gutenberg_search_books', {
       })).describe('Author(s) of the work. Translators and editors are excluded from this field — see gutenberg_get_book for full contributor lists.'),
       languages: z.array(z.string()).describe('Two-character language codes for this edition.'),
       subjects: z.array(z.string()).describe('Library of Congress subject headings for the work.'),
-      download_count: z.number().describe('Total downloads from Project Gutenberg — a real popularity signal reflecting actual reader interest.'),
-      has_plain_text: z.boolean().describe('True if the book has media_type "Text" AND a UTF-8 text/plain format available — both conditions required as audio books (media_type "Sound") can also have text/plain entries that are readme files, not literary content. Use this as the prerequisite check for gutenberg_get_text.'),
+      download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
+      has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; use is_readable for reader support.'),
+      is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
     })).describe('Matching books, ordered by the sort parameter.'),
     totalCount: z.number().describe('Total number of books matching the query across all pages.'),
     page: z.number().describe('Current page number.'),
@@ -160,7 +161,7 @@ tool('gutenberg_search_books', {
 })
 ```
 
-**`format()` rendering:** table of results with id, title, authors, language, download count, and `has_plain_text` flag; total count + page info; note if `hasMore`.
+**`format()` rendering:** IDs, titles, authors, languages, subjects, downloads in the last 30 days at the source snapshot, `has_plain_text`, and `is_readable`; total count, page, and continuation.
 
 ---
 
@@ -172,7 +173,7 @@ tool('gutenberg_search_books', {
 
 ```ts
 tool('gutenberg_get_book', {
-  description: 'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with birth/death years), translators, editors, subjects, bookshelves, languages, copyright status, and the full formats map with download URLs for each available format (plain text, HTML, EPUB, cover image, etc.). Use this before gutenberg_get_text to confirm a plain-text format is available and to get the direct download URL.',
+  description: 'Fetch full metadata by Gutenberg ID, including contributors, subjects, formats, source bibliographic notes, and is_readable for selecting UTF-8 plain-text or HTML editions.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -202,12 +203,14 @@ tool('gutenberg_get_book', {
     bookshelves: z.array(z.string()).describe('Project Gutenberg bookshelf categories (e.g., "Best Books Ever Listings", "Category: Classics of Literature").'),
     languages: z.array(z.string()).describe('Two-character language codes for this edition.'),
     copyright: z.boolean().nullable().describe('Copyright status: false = public domain in the USA, true = under copyright, null = unknown.'),
-    media_type: z.string().describe('"Text" for readable books, "Sound" for audio books. Only "Text" books have plain-text content available for gutenberg_get_text.'),
-    download_count: z.number().describe('Total downloads — popularity signal.'),
+    media_type: z.string().describe('Source media type; use is_readable for reader support.'),
+    download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
+    source_notes: z.array(z.string()).nullable().describe('Direct RDF bibliographic notes, in order. [] means inspected empty; null means unavailable.'),
+    is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
     summary: z.string().nullable().describe('First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.'),
     summaries: z.array(z.string()).describe('Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.'),
     formats: z.record(z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
-    has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format ("text/plain; charset=utf-8") is present in formats — prerequisite for gutenberg_get_text. Audio books (media_type "Sound") may have text/plain entries that are readme files; they return false here.'),
+    has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; HTML-only editions may have is_readable=true.'),
   }),
 
   errors: [
@@ -221,7 +224,7 @@ tool('gutenberg_get_book', {
 })
 ```
 
-**`format()` rendering:** structured display of title, authors/translators/editors (with years), subjects, bookshelves, languages, copyright, download count, summary, any summaries beyond the first, and all formats as a readable key→URL list. Every field renders unconditionally — an empty collection reads `None` and a null summary `Not available` — so a `content[]`-only client can tell a known-empty field from one the server did not report.
+**`format()` rendering:** title, contributors (with years), subjects, bookshelves, languages, copyright, downloads in the last 30 days at the source snapshot, summaries, source notes, readability flags, and all formats. Empty collections read `None`; unavailable nullable fields read `Not available`.
 
 ---
 
@@ -245,8 +248,8 @@ tool('gutenberg_get_text', {
       .describe('Project Gutenberg book ID. Use gutenberg_search_books or gutenberg_get_book to find IDs. Example: 1342 for Pride and Prejudice, 2600 for War and Peace, 84 for Frankenstein.'),
     offset: z.number().int().min(0).default(0)
       .describe('Character offset into the stripped literary text (after boilerplate removal) at which to start reading. 0 returns the beginning of the work. Use the remainingChars field from a prior response to determine whether to continue paging. Offsets are byte-stable within a release — re-fetching the same offset always returns the same content.'),
-    limit: z.number().int().min(1).max(50000).default(20000)
-      .describe('Maximum number of characters to return in this chunk. Default 20,000 characters (~4–5 pages of prose) is a safe starting size for most context windows. Increase toward 50,000 for large context windows; decrease if the response is too large for downstream processing. The actual returned length may be slightly less than limit when a natural paragraph boundary is found within 500 characters of the requested limit — this prevents mid-sentence cuts.'),
+    limit: z.number().int().min(1).default(20000)
+      .describe('Requested character limit, capped locally at 50,000. Paragraph trimming may return less; continue at offset + length.'),
   }),
 
   output: z.object({
@@ -255,6 +258,8 @@ tool('gutenberg_get_text', {
     text: z.string().describe('The requested chunk of literary text, stripped of Gutenberg license boilerplate. Encoding: UTF-8. Line endings: normalized to LF.'),
     offset: z.number().describe('Character offset where this chunk begins.'),
     length: z.number().describe('Number of characters in this chunk.'),
+    requestedLimit: z.number().describe('Character limit requested before capping.'),
+    appliedLimit: z.number().describe('Character limit applied, at most 50,000.'),
     totalChars: z.number().describe('Total characters in the stripped literary text. Use with offset and length to determine progress and plan subsequent calls.'),
     remainingChars: z.number().describe('Characters remaining after this chunk (totalChars - offset - length). 0 means this chunk includes the end of the book.'),
     hasMore: z.boolean().describe('True if there is more text after this chunk. When true, call again with offset = offset + length.'),
@@ -299,7 +304,7 @@ tool('gutenberg_get_text', {
 })
 ```
 
-**`format()` rendering:** provenance line, chunk position summary ("Characters 0–19,999 of 772,389 — 752,389 remaining"), then the text content. When `hasMore` is true, append a clear call-to-action: "Call gutenberg_get_text again with id={id}, offset={offset+length} to read the next chunk."
+**`format()` rendering:** provenance, chunk position, requested/applied limits, then literary text in a fence longer than any embedded backtick run. Structured text and offsets remain unchanged. When `hasMore` is true, continue with `offset + length`.
 
 ---
 
@@ -311,7 +316,7 @@ tool('gutenberg_get_text', {
 
 ```ts
 tool('gutenberg_browse_popular', {
-  description: 'Browse the most-downloaded Project Gutenberg books, ordered by popularity. Returns up to 32 titles with their Gutenberg IDs, authors, languages, and download counts. Optionally filter by language or topic. Use this as a discovery entry point — "what are the most popular classics in French?" — or as a heartbeat check that the catalog is reachable.',
+  description: 'Browse up to 32 Gutenberg books ordered by downloads in the last 30 days at the source snapshot, optionally filtered by language or topic. Returns IDs, titles, authors, languages, counts, and readability flags.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -319,8 +324,8 @@ tool('gutenberg_browse_popular', {
       .describe('Restrict to books in these languages (two-character ISO 639-1 codes). Example: ["en"] for English only, ["de", "fr"] for German or French. Omit for all languages.'),
     topic: z.string().optional()
       .describe('Filter by a subject or bookshelf keyword (case-insensitive phrase match). Example: "science fiction", "adventure", "detective". Applies on top of the language filter.'),
-    limit: z.number().int().min(1).max(32).default(20)
-      .describe('Number of books to return (1–32). Default 20 gives a useful overview without overwhelming context.'),
+    limit: z.number().int().min(1).default(20)
+      .describe('Requested book limit, capped locally at 32. Default 20.'),
   }),
 
   output: z.object({
@@ -333,10 +338,13 @@ tool('gutenberg_browse_popular', {
         death_year: z.number().nullable(),
       })).describe('Author(s).'),
       languages: z.array(z.string()).describe('Language codes.'),
-      download_count: z.number().describe('Total downloads — the basis for the popularity ranking.'),
+      download_count: z.number().describe('Downloads in the last 30 days at the source snapshot — the popularity ranking basis.'),
       has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.'),
-    })).describe('Top books by download count, most popular first.'),
+      is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
+    })).describe('Top books by downloads in the last 30 days at the source snapshot, most popular first.'),
     totalInCatalog: z.number().describe('Total books matching the filter in the full catalog (useful for context — "top 20 of 60,000").'),
+    requestedLimit: z.number().describe('Book limit requested before capping.'),
+    appliedLimit: z.number().describe('Book limit applied locally, at most 32.'),
   }),
 
   errors: [
@@ -350,7 +358,7 @@ tool('gutenberg_browse_popular', {
 })
 ```
 
-**`format()` rendering:** ranked list with rank number, title, author(s), language(s), download count, and plain-text availability flag; total count note at top.
+**`format()` rendering:** ranked list with IDs, titles, contributors, languages, downloads in the last 30 days at the source snapshot, readability flags, and requested/applied limits. Enrichment discloses actual truncation and a count ceiling using the same window, with a same-filter popular-search continuation.
 
 ---
 
@@ -413,12 +421,14 @@ Full-text files are static for months or years. Cache the extracted (stripped, n
 
 A small minority of books lack a `text/plain; charset=utf-8` format and only have `text/html`. In this case:
 - Fetch the mirror's `/cache/epub/N/pgN-images.html` (ID-derived, like the plain-text path — never Gutendex's raw `text/html` format URL, which points at the main site)
-- Strip HTML tags (a regex or a lightweight parser — `node-html-markdown` or similar)
-- Decode HTML entities
-- Preserve `<p>`, `<br>`, `<h1>`–`<h6>`, `<hr>` as paragraph/heading breaks
+- Tokenize once with parse5-sax-parser, excluding title, script, style, and nested template content without building a document tree
+- Decode character references once during parsing; retain Unicode and literal escaped references
+- Preserve block breaks, table cell separators, and distinct rows, including optional closing tags
 - Apply the same `*** START ***/*** END ***` extraction if markers are present in the HTML source; otherwise strip all markup and return the full document body
 
 The HTML fallback is less clean than plain text — formatting artifacts from markup are possible. Surface this via `sourceFormat: 'text/html'` in the response so callers know.
+
+Validate media type and document shape before caching. Plain-text paths reject HTML documents; HTML paths reject narrowly recognized whole-document server templates, never error keywords inside prose or missing Gutenberg markers. Permanent mirror failures use `text_file_not_found` or `text_fetch_rejected`; invalid documents use `invalid_text_response`; transient failures retain `text_fetch_failed`. Cache keys include the processing version so prior cached extraction cannot bypass validation.
 
 ---
 
@@ -430,7 +440,7 @@ The HTML fallback is less clean than plain text — formatting artifacts from ma
 |:--|:-----|:--------|:------|
 | 1 | `GET gutendex.com/books/{id}/` | Resolve format URL + verify media_type | Cached; throws `audio_book` or `no_text_format` early; 5s per attempt under a 15s ladder budget |
 | 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; 30s per attempt under a 35s ladder budget |
-| — | In-process pipeline | BOM strip, marker extraction, normalize, chunk | CPU-only; ~1–5ms |
+| — | In-process pipeline | BOM strip, HTML parsing when needed, marker extraction, normalize, chunk | CPU-only; depends on file size and format |
 
 Two upstream calls total for a cache miss, one (or zero) for a cache hit. Worst case both hops exhaust their budgets: 50 seconds, inside the 60-second default MCP client request timeout, so the caller receives a real error instead of its own timeout. The catalog call and the text fetch are independent enough to parallelize — but since the text URL comes from the catalog record, they must be sequential on a cache miss. Parallelism only helps after the first call populates the catalog cache.
 
@@ -438,7 +448,7 @@ Two upstream calls total for a cache miss, one (or zero) for a cache hit. Worst 
 
 ```
 gutenberg_search_books(query="frankenstein")
-  → id: 84, has_plain_text: true
+  → id: 84, has_plain_text: true, is_readable: true
 
 gutenberg_get_text(id=84, offset=0, limit=20000)
   → text: "Chapter 1. Letter 1…", totalChars: 448000, remainingChars: 428000
@@ -464,16 +474,18 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Cache stripped text, not raw file bytes** | The post-extraction text is what every request re-uses. Caching raw bytes wastes memory and requires re-running the extraction pipeline on every request. |
 | **24-hour text cache TTL, 1-hour catalog TTL** | Text files are effectively immutable (updated at most a few times a year). Catalog metadata changes more often (download counts, new additions). Different TTLs reflect actual update frequency. |
 | **No `author_year_start/end` in `browse_popular`** | `browse_popular` is a discovery shortcut, not a research tool. Year-range filtering on a popularity browse is a niche compound query that belongs in `search_books` where the fuller filter set is available. |
-| **`has_plain_text` computed field on search/browse results** | Saves agents an extra `get_book` call just to check format availability. Computed as `media_type === "Text" AND formats has "text/plain; charset=utf-8"`. The media_type guard is required: audio books (media_type "Sound") can have text/plain entries in their formats map, but those are readme/index files for the audio recording, not literary text. |
+| **Separate `is_readable` and `has_plain_text`** | `is_readable` follows the existing reader boundary: non-Sound with UTF-8 plain text or HTML. `has_plain_text` keeps the narrower Text + UTF-8 meaning. Both are computed at hydration, so old mirror records gain readability without a harvest. |
+| **Nullable source notes in the mirror** | Direct RDF book descriptions preserve explicit edition references without another fetch. An additive nullable column keeps existing rows readable with `null`; the next normal harvest distinguishes populated notes from inspected-empty `[]`. |
+| **Positive requested limits with local output caps** | Text stays bounded at 50,000 characters and browse at 32 books without adding upstream work. Requested/applied limits are explicit; actual remaining text or catalog matches determine truncation. |
 | **`ids` as comma-separated query string value** | The Gutendex API accepts ids as a single comma-separated value (`ids=84,1342`), not as repeated URL parameters (`ids=84&ids=1342` only returns the last value). Other filters still apply when ids is set — a conflicting language filter reduces results. The Zod input is `z.array(z.number())` and the service layer joins with commas. |
 | **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
-| **No `mime_type` filter parameter exposed** | The Gutendex `mime_type` filter exists but is low-value for agents: agents want "books with readable text" not "books with this exact MIME string". The `has_plain_text` computed field covers the practical need. |
+| **No `mime_type` filter parameter exposed** | `is_readable` expresses reader support directly, while `has_plain_text` preserves narrow format availability. |
 | **`copyright` filter not exposed** | All Gutenberg books are public domain or public-domain-in-USA (copyright: false). The `true` and `null` buckets are edge cases not relevant to the server's stated purpose. Exposing the filter would add noise for no agent benefit. |
 | **`summary` as nullable, with the full `summaries` array alongside** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. `summary` stays a nullable string — the first element if present — so the common single-summary read needs no array handling; `summaries` carries the complete set for the records that hold more than one, which reducing to the first element silently dropped. `content[]` lists only the entries beyond `summary` rather than repeating a multi-hundred-character paragraph. |
 | **`content[]` states absent fields rather than omitting them** | `structuredContent` carries `[]` and `null` verbatim, so a formatter that drops the line leaves a `content[]`-only client unable to distinguish a known-empty field from one the server never reported. Every collection and nullable in `gutenberg_get_book`, and the per-book subject list in `gutenberg_search_books`, therefore render unconditionally. Sentinel-based `format-parity` linting exercises one populated value per leaf and cannot catch value-dependent omission, so the empty states are covered by tests instead. |
 | **Refuse audio books explicitly** | Audio books have `media_type: "Sound"` and no literary text. Returning a readme file or an error without a clear message would confuse agents. The `audio_book` error contract gives a specific reason and recovery path. |
 | **No search-within-book tool (deferred)** | Passage/quote search within a book requires either full-text indexing (non-trivial service layer) or sequential scanning across chunks (many API calls). Deferred to a future enhancement. Agents can page through `get_text` chunks and apply their own search logic. |
-| **One wall-clock budget per upstream ladder, composed with `ctx.signal`** | `RetryOptions` has no elapsed-time field, and a ceiling checked only between attempts still overshoots by a whole in-flight attempt. The budget is therefore an `AbortSignal` threaded into both `withRetry` and `fetchWithTimeout`, so it tears the request down rather than racing it. The catalog ladder gets 15s and the text ladder 35s, keeping the two-hop `gutenberg_get_text` worst case under the 60s default client timeout — past that the client cancels first and the caller gets no error at all. |
+| **One wall-clock budget per upstream ladder, composed with `ctx.signal`** | The composed signal bounds in-flight attempts as well as retry backoff; the helper also normalizes exhausted ladders and preserves caller cancellation. The catalog gets 15s and the text mirror 35s, inside the default 60s client timeout. |
 | **Catalog per-attempt timeout of 5s, well under Gutendex's own ~15s boundary** | Measured Gutendex latency is bimodal: warm queries answer in tens of milliseconds, cold ones not at all until the upstream's own gateway gives up around 15s, with nothing observed in between. What clears a cold query is a later attempt finding the cache filled, not the current one waiting longer — so a short per-attempt ceiling buys three attempts inside the budget where a long one buys two, at no cost to any answer the upstream would actually have returned. The text mirror is the opposite case and keeps its 30s attempt: multi-megabyte files legitimately take tens of seconds. |
 | **Upstream outages are declared contract reasons, not bubbled fetch errors** | `catalog_unavailable` (all four tools) and `text_fetch_failed` (`gutenberg_get_text`) carry a recovery hint to both `structuredContent.error.data` and the mirrored `content[]` text. Their messages name the catalog or the book rather than the resolved request URL, which embeds an operator-configured, overridable base URL. The original error stays on `cause` for server-side logs. A caller cancel is never relabelled — it is not an upstream outage, and advertising a retry for it would be wrong. |
 | **`GUTENDEX_BASE_URL` and `GUTENBERG_TEXT_BASE_URL` override env vars** | Gutendex is open-source and self-hostable; the project explicitly encourages it. Some deployers may also run Gutenberg mirrors. Overrides cost nothing to implement and unlock private/enterprise deployments. |
@@ -484,7 +496,7 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 
 | Limitation | Detail |
 |:-----------|:-------|
-| **Text-only corpus** | Only books with `media_type: "Text"` are servable. Audio books (over 1,000 entries) are accessible as metadata but not readable text. |
+| **Audio entries are metadata-only** | `media_type: "Sound"` records are rejected by the reader regardless of formats. Other media types follow the supported UTF-8 plain-text or HTML formats. |
 | **ASCII-only entries are unreadable** | Older catalog entries whose only plain-text format is `text/plain; charset=us-ascii` have no path on the PG-sanctioned mirror this server sources from — serving them would require fetching the human-only main site, which its Terms of Use prohibit. These return `no_text_format` rather than falling back to the main site. |
 | **No chapter-aware chunking** | Chapter boundaries in Gutenberg plain-text files are not consistently marked across the catalog (headings vary — "Chapter I", "CHAPTER 1", "Part First", etc.). The design uses paragraph-boundary chunking, which is reliable and consistent. True chapter detection would require per-book parsing heuristics and is deferred. |
 | **HTML fallback quality** | Books fetched via the HTML fallback may include formatting artifacts from markup conversion. The `sourceFormat` field signals this so agents can note the limitation. |

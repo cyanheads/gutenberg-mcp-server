@@ -12,7 +12,13 @@
  */
 
 import { XMLParser } from 'fast-xml-parser';
-import { type Book, hasPlainText, type Person, type RawBook } from '@/services/gutendex/types.js';
+import {
+  type Book,
+  hasPlainText,
+  isReadable,
+  type Person,
+  type RawBook,
+} from '@/services/gutendex/types.js';
 
 /**
  * Project Gutenberg's RDF generator emits fixed namespace prefixes, so elements
@@ -239,5 +245,14 @@ export function parseBookRdf(xml: string, id: number): Book | null {
     formats: formatsOf(ebook),
   };
 
-  return { ...raw, summary: summaries[0] ?? null, has_plain_text: hasPlainText(raw) };
+  const source_notes = asArray((ebook as XmlNode)['dcterms:description'])
+    .map(textOf)
+    .filter((text): text is string => text !== undefined);
+  return {
+    ...raw,
+    summary: summaries[0] ?? null,
+    has_plain_text: hasPlainText(raw),
+    is_readable: isReadable(raw),
+    source_notes,
+  };
 }

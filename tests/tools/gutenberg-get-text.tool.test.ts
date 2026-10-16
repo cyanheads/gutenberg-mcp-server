@@ -51,6 +51,8 @@ const textBook = {
     'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/84.txt.utf-8',
   },
   has_plain_text: true,
+  is_readable: true,
+  source_notes: null,
 };
 
 const audioBook = {
@@ -94,6 +96,64 @@ beforeEach(() => {
 // ── Happy path ───────────────────────────────────────────────────────────────
 
 describe('gutenbergGetText — happy path', () => {
+  it('renders literal book text in a collision-safe fence without changing offsets or structured text', async () => {
+    const literary = '<em> *asterisks* _underscores_\n```\n``````\nend';
+    mockGutendexService.getBook.mockResolvedValue(textBook);
+    mockTextService.fetchAndCacheText.mockResolvedValue({ ...cachedText, text: literary });
+    const result = await runToolContract(gutenbergGetText, { id: 84 });
+    expect(result.structuredContent).toMatchObject({
+      text: literary,
+      offset: 0,
+      length: literary.length,
+    });
+    const rendered = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(rendered).toContain(`\n\`\`\`\`\`\`\`text\n${literary}\n\`\`\`\`\`\`\`\n`);
+  });
+  it.each([50000, 50001, 1_000_000])(
+    'caps a requested %i characters on both surfaces',
+    async (limit) => {
+      mockGutendexService.getBook.mockResolvedValue(textBook);
+      mockTextService.fetchAndCacheText.mockResolvedValue({
+        ...cachedText,
+        text: 'x'.repeat(100001),
+      });
+      const result = await runToolContract(gutenbergGetText, { id: 84, limit });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        requestedLimit: limit,
+        appliedLimit: 50000,
+        length: 50000,
+        hasMore: true,
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain(`Requested limit: ${limit.toLocaleString()}`);
+      expect(text).toContain('Applied limit: 50,000');
+      expect(text).toContain('offset=50000');
+      expect(mockTextService.chunkText).toHaveBeenCalledWith(expect.anything(), 0, 50000);
+    },
+  );
+
+  it('does not claim remaining text merely because the requested limit was clamped', async () => {
+    mockGutendexService.getBook.mockResolvedValue(textBook);
+    mockTextService.fetchAndCacheText.mockResolvedValue(cachedText);
+    const result = await runToolContract(gutenbergGetText, { id: 84, limit: 50001 });
+    expect(result.structuredContent).toMatchObject({
+      hasMore: false,
+      remainingChars: 0,
+      requestedLimit: 50001,
+      appliedLimit: 50000,
+    });
+  });
+
+  it.each([0, -1, 1.5, Infinity, NaN])(
+    'rejects invalid limit %s before fetching',
+    async (limit) => {
+      const result = await runToolContract(gutenbergGetText, { id: 84, limit });
+      expect(result.isError).toBe(true);
+      expect(mockGutendexService.getBook).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns the first chunk with correct metadata', async () => {
     mockGutendexService.getBook.mockResolvedValue(textBook);
     mockTextService.fetchAndCacheText.mockResolvedValue(cachedText);
@@ -551,6 +611,8 @@ describe('gutenbergGetText — upstream outages reach both client surfaces', () 
 
 describe('gutenbergGetText — format()', () => {
   const baseOutput = {
+    requestedLimit: 20000,
+    appliedLimit: 20000,
     id: 84,
     title: 'Frankenstein',
     text: 'Chapter 1. You will rejoice to hear...',

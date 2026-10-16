@@ -28,7 +28,7 @@ await createApp({
   resources: [],
   prompts: [],
   instructions:
-    'Project Gutenberg MCP server. No API key required. Typical workflow: gutenberg_search_books → gutenberg_get_book → gutenberg_get_text. Use gutenberg_browse_popular for discovery. gutenberg_get_text supports offset/limit chunking for long works — novels routinely exceed 500KB. Only books with has_plain_text=true can be read with gutenberg_get_text.',
+    'Project Gutenberg MCP server. No API key required. Typical workflow: gutenberg_search_books → gutenberg_get_book → gutenberg_get_text. Use gutenberg_browse_popular for discovery. gutenberg_get_text supports offset/limit chunking for long works — novels routinely exceed 500KB. Use is_readable=true to find supported UTF-8 plain-text or HTML editions; has_plain_text reports UTF-8 plain-text availability only. Popularity uses downloads in the last 30 days at the source snapshot.',
   /**
    * No tool here gates on `ctx.requestInput`, so nothing needs a session to
    * answer into. Declaring it in `src/` rather than leaving it to a deployment's

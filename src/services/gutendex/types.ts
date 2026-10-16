@@ -54,8 +54,12 @@ export interface Book {
   /** True when media_type is "Text" and a UTF-8 text/plain format is available. */
   has_plain_text: boolean;
   id: number;
+  /** True for non-Sound records with a supported UTF-8 plain-text or HTML format. */
+  is_readable: boolean;
   languages: string[];
   media_type: string;
+  /** Direct RDF bibliographic notes; null when the source did not supply them. */
+  source_notes: string[] | null;
   subjects: string[];
   /** Every upstream summary, in upstream order. Empty when there are none. */
   summaries: string[];
@@ -88,4 +92,12 @@ export interface SearchParams {
 export function hasPlainText(book: RawBook): boolean {
   if (book.media_type !== 'Text') return false;
   return 'text/plain; charset=utf-8' in book.formats;
+}
+
+/** Whether the existing reader supports this record's media type and formats. */
+export function isReadable(book: Pick<RawBook, 'media_type' | 'formats'>): boolean {
+  return (
+    book.media_type !== 'Sound' &&
+    ('text/plain; charset=utf-8' in book.formats || 'text/html' in book.formats)
+  );
 }

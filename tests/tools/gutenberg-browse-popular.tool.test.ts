@@ -33,6 +33,7 @@ const makeBook = (n: number) => ({
   summary: null,
   formats: { 'text/plain; charset=utf-8': `https://www.gutenberg.org/ebooks/${n}.txt.utf-8` },
   has_plain_text: true,
+  is_readable: true,
 });
 
 beforeEach(() => {
@@ -40,6 +41,77 @@ beforeEach(() => {
 });
 
 describe('gutenbergBrowsePopular', () => {
+  it('renders readability and the snapshot window for counts and the omitted-result ceiling', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [{ ...makeBook(1), is_readable: true, has_plain_text: false }],
+      totalCount: 100,
+      hasMore: true,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergBrowsePopular, {});
+    expect(result.structuredContent).toMatchObject({
+      books: [{ is_readable: true, has_plain_text: false, download_count: 9999 }],
+      truncationCeiling: 9999,
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('Readable: Yes');
+    expect(text.match(/last 30 days/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(text).toContain('source snapshot');
+  });
+  it.each([32, 33, 1_000_000])('caps a requested %i books on both surfaces', async (limit) => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
+      totalCount: 100,
+      hasMore: true,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergBrowsePopular, {
+      limit,
+      languages: ['en'],
+      topic: 'fiction',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      requestedLimit: limit,
+      appliedLimit: 32,
+      cap: 32,
+      shown: 32,
+      truncated: true,
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(`Requested limit: ${limit.toLocaleString()}`);
+    expect(text).toContain('Applied limit: 32');
+    expect(text).toContain('same language/topic');
+    expect(mockGutendexService.searchBooks).toHaveBeenCalledExactlyOnceWith(
+      { sort: 'popular', languages: ['en'], topic: 'fiction' },
+      expect.anything(),
+    );
+  });
+
+  it('keeps short clamped results complete', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [makeBook(1)],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergBrowsePopular, { limit: 1000 });
+    expect(result.structuredContent).toMatchObject({
+      requestedLimit: 1000,
+      appliedLimit: 32,
+      cap: 32,
+      truncated: false,
+    });
+  });
+
+  it.each([0, -1, 1.5, Infinity, NaN])(
+    'rejects invalid limit %s before fetching',
+    async (limit) => {
+      expect((await runToolContract(gutenbergBrowsePopular, { limit })).isError).toBe(true);
+      expect(mockGutendexService.searchBooks).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns the top N books ordered by popularity', async () => {
     const allBooks = Array.from({ length: 32 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
@@ -242,6 +314,8 @@ describe('gutenbergBrowsePopular', () => {
   describe('format()', () => {
     it('renders ranked list with rank number, title, authors, language, downloads, and text flag', () => {
       const output = {
+        requestedLimit: 20,
+        appliedLimit: 20,
         books: [
           {
             id: 1342,
@@ -250,6 +324,7 @@ describe('gutenbergBrowsePopular', () => {
             languages: ['en'],
             download_count: 75000,
             has_plain_text: true,
+            is_readable: true,
           },
           {
             id: 11,
@@ -258,6 +333,7 @@ describe('gutenbergBrowsePopular', () => {
             languages: ['en'],
             download_count: 65000,
             has_plain_text: true,
+            is_readable: true,
           },
         ],
         totalInCatalog: 65000,
@@ -278,6 +354,8 @@ describe('gutenbergBrowsePopular', () => {
 
     it('renders authors with null years without crashing', () => {
       const output = {
+        requestedLimit: 20,
+        appliedLimit: 20,
         books: [
           {
             id: 99,
@@ -286,6 +364,7 @@ describe('gutenbergBrowsePopular', () => {
             languages: ['en'],
             download_count: 100,
             has_plain_text: false,
+            is_readable: false,
           },
         ],
         totalInCatalog: 1,
@@ -341,7 +420,9 @@ describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
 
     expect(text).not.toContain('more matching books');
     expect(text).toMatch(/complete/i);
-    expect(text).toContain('Returned the top 1 by download count.');
+    expect(text).toContain(
+      'Returned the top 1 by downloads in the last 30 days (source snapshot).',
+    );
   });
 
   it('still discloses truncation on both surfaces when the catalog holds more', async () => {

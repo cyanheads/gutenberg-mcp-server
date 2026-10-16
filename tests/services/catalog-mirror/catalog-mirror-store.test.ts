@@ -6,7 +6,10 @@
  * @module tests/services/catalog-mirror/catalog-mirror-store.test
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { describe, expect, it } from 'vitest';
 import {
   bookFromRow,
@@ -26,6 +29,55 @@ function parse(id: number): Book {
 }
 
 describe('catalogStoreSpec', () => {
+  it('migrates an existing database without a harvest and safely creates fresh databases', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gutenberg-notes-migration-'));
+    try {
+      for (const legacy of [true, false]) {
+        const path = join(dir, `${legacy ? 'legacy' : 'fresh'}.sqlite`);
+        if (legacy) {
+          const spec = catalogStoreSpec(path);
+          delete spec.columns.source_notes;
+          const old = sqliteMirrorStore({ ...spec, version: 1, migrations: [] });
+          try {
+            const row = rowFromBook(parse(84));
+            delete row.source_notes;
+            await old.applyBatch([row], []);
+          } finally {
+            await old.close();
+          }
+        }
+        const store = sqliteMirrorStore(catalogStoreSpec(path));
+        try {
+          if (legacy) {
+            const {
+              rows: [row],
+            } = await store.query({
+              filters: [{ column: 'id', op: 'eq', value: 84 }],
+              limit: 1,
+              offset: 0,
+            });
+            expect(row).toBeDefined();
+            expect(bookFromRow(row ?? {}).source_notes).toBeNull();
+            expect(bookFromRow(row ?? {}).is_readable).toBe(true);
+            expect(
+              (await store.query({ match: 'Frankenstein', limit: 10, offset: 0 })).rows,
+            ).toHaveLength(1);
+          }
+          const refreshed = { ...parse(84), source_notes: ['Édition #42324', '1818 #41445'] };
+          await store.applyBatch([rowFromBook(refreshed)], []);
+          expect((await store.query({ limit: 1, offset: 0 })).rows.map(bookFromRow)).toEqual([
+            refreshed,
+          ]);
+          expect(await store.count()).toBe(1);
+        } finally {
+          await store.close();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('indexes only declared columns', () => {
     const spec = catalogStoreSpec(':memory:');
     const columns = Object.keys(spec.columns);
@@ -53,6 +105,26 @@ describe('catalogStoreSpec', () => {
 });
 
 describe('rowFromBook / bookFromRow', () => {
+  it('derives readability from legacy formats without requiring a harvest', () => {
+    const legacy = {
+      ...rowFromBook(parse(84)),
+      formats: JSON.stringify({ 'text/html': 'https://example/book.html' }),
+      has_plain_text: 0,
+    };
+    expect(bookFromRow(legacy)).toMatchObject({ is_readable: true, has_plain_text: false });
+  });
+
+  it('distinguishes unavailable legacy notes, inspected empty notes, and Unicode notes in order', () => {
+    const book = parse(84);
+    const legacy = { ...rowFromBook(book) };
+    delete legacy.source_notes;
+    expect(bookFromRow(legacy).source_notes).toBeNull();
+    for (const source_notes of [null, [], ['Édition #42324', 'First #41445']]) {
+      expect(bookFromRow(rowFromBook({ ...book, source_notes })).source_notes).toEqual(
+        source_notes,
+      );
+    }
+  });
   it.each([84, 1073, 1399, 10056, 10137, 45304])(
     'round-trips book %i without losing a field',
     (id) => {

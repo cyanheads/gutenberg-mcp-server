@@ -11,7 +11,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   title: 'Browse Popular Gutenberg Books',
   description:
-    'Browse the most-downloaded Project Gutenberg books, ordered by popularity. Returns up to 32 titles with their Gutenberg IDs, authors, languages, and download counts. Optionally filter by language or topic. Use this as a discovery entry point — "what are the most popular classics in French?" — or as a heartbeat check that the catalog is reachable.',
+    'Browse Project Gutenberg books ordered by downloads in the last 30 days at the source snapshot. Returns up to 32 titles with IDs, authors, languages, download counts, and is_readable. Optionally filter by language or topic. Use this for discovery — "what are the most popular classics in French?" — or to check that the catalog is reachable.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -31,14 +31,15 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       .number()
       .int()
       .min(1)
-      .max(32)
       .default(20)
       .describe(
-        'Number of books to return (1–32). Default 20 gives a useful overview without overwhelming context.',
+        'Requested number of books. Default 20; requests above 32 are capped locally at 32.',
       ),
   }),
 
   output: z.object({
+    requestedLimit: z.number().describe('Positive integral book limit requested before capping.'),
+    appliedLimit: z.number().describe('Book limit applied locally, at most 32.'),
     books: z
       .array(
         z
@@ -62,16 +63,25 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
             languages: z.array(z.string()).describe('Language codes.'),
             download_count: z
               .number()
-              .describe('Total downloads — the basis for the popularity ranking.'),
+              .describe(
+                'Downloads in the last 30 days at the source snapshot — the popularity ranking basis.',
+              ),
             has_plain_text: z
               .boolean()
               .describe(
-                'True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.',
+                'True for Text records with UTF-8 plain text; HTML-only editions can still have is_readable=true.',
+              ),
+            is_readable: z
+              .boolean()
+              .describe(
+                'True for non-Sound records with UTF-8 plain text or HTML supported by gutenberg_get_text.',
               ),
           })
           .describe('Book entry.'),
       )
-      .describe('Top books by download count, most popular first.'),
+      .describe(
+        'Top books by downloads in the last 30 days at the source snapshot, most popular first.',
+      ),
     totalInCatalog: z
       .number()
       .describe(
@@ -87,7 +97,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       .number()
       .optional()
       .describe(
-        'Download count of the least-popular book shown — omitted books have at most this many downloads.',
+        'Downloads in the last 30 days at the source snapshot for the least-popular book shown; omitted books have at most this count.',
       ),
   },
 
@@ -107,16 +117,17 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
           : 'Complete — every matching book in the catalog is shown here.',
     },
     shown: {
-      render: (value) => `Returned the top ${value} by download count.`,
+      render: (value) =>
+        `Returned the top ${value} by downloads in the last 30 days (source snapshot).`,
     },
     cap: {
-      render: (value) => `Requested limit: ${value} (max 32 per call).`,
+      render: (value) => `Applied cap: ${value} (max 32 per call).`,
     },
     truncationCeiling: {
       render: (value) =>
         value === undefined
           ? ''
-          : `The least-popular book shown has ${value.toLocaleString()} downloads; omitted books rank lower. ` +
+          : `The least-popular book shown has ${value.toLocaleString()} downloads in the last 30 days (source snapshot); omitted books have at most this count. ` +
             'To page through the full result set, call gutenberg_search_books with the same language/topic ' +
             'filters, sort="popular", and successive page values.',
     },
@@ -161,13 +172,14 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       throw ctx.fail('no_results', 'No books matched the filter criteria.');
     }
 
-    const limited = result.books.slice(0, input.limit);
+    const appliedLimit = Math.min(input.limit, 32);
+    const limited = result.books.slice(0, appliedLimit);
 
     if (result.totalCount > limited.length) {
       const ceiling = limited.at(-1)?.download_count;
       ctx.enrich.truncated({
         shown: limited.length,
-        cap: input.limit,
+        cap: appliedLimit,
         ...(ceiling !== undefined && { ceiling }),
         guidance:
           'The catalog holds more matches than shown. Raise limit (max 32) for a longer list, or use gutenberg_search_books to page through all results.',
@@ -177,10 +189,12 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       // `ctx.enrich.truncated(...)` writes `truncated: true` unconditionally — so
       // the complete case has to populate them through the loose call, or the
       // effective-output parse rejects an otherwise-valid response.
-      ctx.enrich({ truncated: false, shown: limited.length, cap: input.limit });
+      ctx.enrich({ truncated: false, shown: limited.length, cap: appliedLimit });
     }
 
     return {
+      requestedLimit: input.limit,
+      appliedLimit,
       books: limited.map((b) => ({
         id: b.id,
         title: b.title,
@@ -188,6 +202,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
         languages: b.languages,
         download_count: b.download_count,
         has_plain_text: b.has_plain_text,
+        is_readable: b.is_readable,
       })),
       totalInCatalog: result.totalCount,
     };
@@ -199,6 +214,10 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       `**Top ${result.books.length} of ${result.totalInCatalog.toLocaleString()} books in catalog**`,
     );
     lines.push('');
+
+    lines.push(
+      `Requested limit: ${result.requestedLimit.toLocaleString()} | Applied limit: ${result.appliedLimit.toLocaleString()}`,
+    );
 
     result.books.forEach((book, idx) => {
       const authorStr =
@@ -215,7 +234,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
           : 'Unknown';
       lines.push(`${idx + 1}. **[${book.id}]** ${book.title} — ${authorStr}`);
       lines.push(
-        `   Lang: ${book.languages.join(', ')} | Downloads: ${book.download_count.toLocaleString()} | Text: ${book.has_plain_text ? 'Yes' : 'No'}`,
+        `   Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
       );
     });
 

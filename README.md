@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/gutenberg-mcp-server</h1>
-  <p><b>Search, browse, and read 75,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Search, browse, and read 78,000+ public-domain books from Project Gutenberg with full plain-text retrieval and offset/limit chunking via MCP. STDIO or Streamable HTTP.</b>
   <div>4 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/gutenberg-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/gutenberg-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/gutenberg-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Project Gutenberg's library of 78,000+ public-domain books, cataloged through the Gutendex API and served from a Gutenberg content mirror. Search by title, author, topic, or language, fetch full book metadata, and retrieve plain-text content in offset/limit chunks for long works from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Project Gutenberg's library of 78,000+ public-domain books. Search by title, author, topic, or language, fetch full book metadata, and read supported UTF-8 plain-text and HTML editions in manageable chunks.
 
 ### Tools
 
@@ -48,9 +48,9 @@ Project Gutenberg's library of 78,000+ public-domain books, cataloged through th
 
 - Free-text `query` matches titles and author names; `topic` matches subjects/bookshelves separately from `query`
 - Filters: `languages` (ISO 639-1 codes), `author_year_start`/`author_year_end` lifespan range, `ids` for a batch lookup by known ID list
-- `sort`: `popular` (default, by download count) or `ascending`/`descending` by Gutenberg ID
+- `sort`: `popular` (default, by downloads in the last 30 days at the source snapshot) or `ascending`/`descending` by Gutenberg ID
 - Paginated — up to 32 books per page; `totalCount` and `hasMore` drive further pages
-- Each result carries `has_plain_text` to pre-filter before calling `gutenberg_get_text`
+- Each result carries `is_readable` to select UTF-8 plain-text or HTML editions supported by `gutenberg_get_text`; `has_plain_text` specifically reports UTF-8 plain text on Text records
 - Typed failures: `no_results`, `page_out_of_range`, `catalog_unavailable`
 
 ---
@@ -59,7 +59,9 @@ Project Gutenberg's library of 78,000+ public-domain books, cataloged through th
 
 - Returns the full `formats` map (MIME type → download URL) — plain text, HTML, EPUB, cover image
 - Authors, translators, and editors each carry birth/death years
-- `has_plain_text` confirms a UTF-8 plain-text format exists; `media_type` distinguishes text books from audio (`"Sound"`)
+- `is_readable` follows the reader's non-audio guard and supported UTF-8 plain-text or HTML formats; `has_plain_text` specifically reports UTF-8 plain text on Text records
+- `source_notes` preserves RDF bibliographic notes and explicit edition IDs verbatim. `[]` means the RDF was inspected and had none; `null` means unavailable from Gutendex or an older mirror row. Existing mirror rows remain readable, with notes filled on the next normal harvest
+- `download_count` is downloads in the last 30 days at the source snapshot, not a lifetime or live count
 - `summary` is the first entry of Gutendex's `summaries` array — both are `null`/empty when Gutendex has none
 - Typed failures: `not_found`, `catalog_unavailable`
 
@@ -67,21 +69,22 @@ Project Gutenberg's library of 78,000+ public-domain books, cataloged through th
 
 ### `gutenberg_get_text` <sub>tool</sub>
 
-- `offset`/`limit` chunking (limit 1–50,000, default 20,000) for works that routinely run 500KB–2MB
+- `offset`/`limit` chunking (positive integral requested limit, default 20,000; capped locally at 50,000) for works that routinely run 500KB–2MB. `requestedLimit` and `appliedLimit` report both limits
 - Strips the standard Gutenberg license header and footer before chunking
 - Prefers UTF-8 plain text; falls back to an HTML-to-text conversion (`sourceFormat` reports which)
+- HTML extraction preserves Unicode, table boundaries, and literal character references in a single decoding pass; rendered literary text uses collision-safe fences without changing structured text or offsets
 - Response carries `totalChars`, `length`, `remainingChars`, `hasMore` — use `length`, not `limit`, to compute the next `offset`, since paragraph-boundary trimming can return slightly less than requested
 - `provenance` carries the Gutenberg ID, title, and license URL for attribution
-- Typed failures: `not_found`, `audio_book` (refuses `media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_fetch_failed`, `catalog_unavailable`
+- Typed failures: `not_found`, `audio_book` (refuses `media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_file_not_found` (mirror HTTP 404), `text_fetch_rejected` (permanent HTTP rejection), `invalid_text_response` (empty or recognizable non-book document), `text_fetch_failed` (transient failure), `catalog_unavailable`
 
 ---
 
 ### `gutenberg_browse_popular` <sub>tool</sub>
 
-- Returns up to 32 titles (`limit`, default 20) ordered by download count, most popular first
+- Returns up to 32 titles (`limit`, default 20) ordered by downloads in the last 30 days at the source snapshot, most popular first. Larger positive integral requests are capped locally at 32; `requestedLimit` and `appliedLimit` report both limits
 - Optional `languages` and `topic` filters, applied together
 - `totalInCatalog` gives full context (e.g. "top 20 of 60,000")
-- Enrichment reports whether results were truncated and the download-count ceiling of the least-popular book shown, pointing to `gutenberg_search_books` to page through the rest
+- Enrichment reports actual catalog truncation and the least-popular book's downloads in the last 30 days at the source snapshot, pointing to `gutenberg_search_books` with the same filters and popular sort to page through the rest
 - Typed failures: `no_results`, `catalog_unavailable`
 
 ---
@@ -100,10 +103,10 @@ Gutenberg-specific:
 
 Agent-friendly output:
 
-- `has_plain_text` flag on every search/browse result lets agents pre-filter before attempting text retrieval
+- `is_readable` on every search/browse result lets agents select supported UTF-8 plain-text or HTML editions before text retrieval
 - Precise chunking contract on `gutenberg_get_text` — `offset`, `length`, `totalChars`, `remainingChars`, `hasMore` for reliable sequential reads
 - `provenance` and discriminated `sourceFormat` fields on every text response, for attribution and fidelity awareness
-- `gutenberg_browse_popular` enrichment reports truncation state and the download-count ceiling of omitted results
+- `gutenberg_browse_popular` enrichment reports truncation state and the downloads-in-the-last-30-days ceiling at the source snapshot for omitted results
 
 ---
 

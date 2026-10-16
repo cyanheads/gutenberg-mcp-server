@@ -29,6 +29,7 @@ const mockBook = {
   summary: null,
   formats: { 'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/1342.txt.utf-8' },
   has_plain_text: true,
+  is_readable: true,
 };
 
 const mockGutendexService = {
@@ -41,6 +42,22 @@ beforeEach(() => {
 });
 
 describe('gutenbergSearchBooks', () => {
+  it('carries HTML readability and the snapshot popularity window on both surfaces', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [{ ...mockBook, is_readable: true, has_plain_text: false }],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergSearchBooks, {});
+    expect(result.structuredContent).toMatchObject({
+      books: [{ is_readable: true, has_plain_text: false, download_count: 75000 }],
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('Readable: Yes');
+    expect(text).toContain('last 30 days');
+    expect(text).toContain('source snapshot');
+  });
   it('returns matched books with all fields', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [mockBook],
@@ -209,6 +226,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: ['Fiction'],
             download_count: 75000,
             has_plain_text: true,
+            is_readable: true,
           },
         ],
         totalCount: 1,
@@ -247,6 +265,7 @@ describe('gutenbergSearchBooks', () => {
             subjects,
             download_count: 75000,
             has_plain_text: true,
+            is_readable: true,
           },
         ],
         totalCount: 1,
@@ -273,6 +292,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: [],
             download_count: 1,
             has_plain_text: false,
+            is_readable: false,
           },
         ],
         totalCount: 100,
@@ -297,6 +317,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: [],
             download_count: 12,
             has_plain_text: true,
+            is_readable: true,
           },
         ],
         totalCount: 1,
@@ -318,6 +339,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: ['Fiction'],
             download_count: 5,
             has_plain_text: true,
+            is_readable: true,
           },
           {
             id: 2,
@@ -327,6 +349,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: [],
             download_count: 4,
             has_plain_text: true,
+            is_readable: true,
           },
         ],
         totalCount: 2,
@@ -351,6 +374,7 @@ describe('gutenbergSearchBooks', () => {
             subjects: [],
             download_count: 10,
             has_plain_text: false,
+            is_readable: false,
           },
         ],
         totalCount: 1,

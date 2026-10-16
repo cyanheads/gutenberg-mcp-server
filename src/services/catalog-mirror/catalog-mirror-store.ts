@@ -12,7 +12,7 @@
  */
 
 import type { MirrorRow, SqliteMirrorStoreSpec } from '@cyanheads/mcp-ts-core/mirror';
-import type { Book, Person } from '@/services/gutendex/types.js';
+import { type Book, isReadable, type Person } from '@/services/gutendex/types.js';
 
 /** Primary table holding one row per Gutenberg book. */
 export const CATALOG_TABLE = 'books';
@@ -54,13 +54,15 @@ export interface CatalogBookRow extends MirrorRow {
   editors: string;
   /** JSON `Record<string, string>` of MIME type → URL. */
   formats: string;
-  /** 1 when `gutenberg_get_text` can serve this book, else 0. */
+  /** 1 for Text records with a UTF-8 plain-text format, else 0. */
   has_plain_text: number;
   id: number;
   /** JSON `string[]`. */
   languages: string;
   languages_text: string;
   media_type: string;
+  /** JSON notes, or null for rows whose source notes were unavailable. */
+  source_notes?: string | null;
   /** JSON `string[]`. */
   subjects: string;
   subjects_text: string;
@@ -82,6 +84,17 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: CATALOG_TABLE,
     primaryKey: 'id',
+    version: 2,
+    migrations: [
+      {
+        version: 2,
+        up(db) {
+          const columns = db.prepare('PRAGMA table_info(books)').all() as { name: string }[];
+          if (!columns.some((column) => column.name === 'source_notes'))
+            db.exec('ALTER TABLE books ADD COLUMN source_notes TEXT');
+        },
+      },
+    ],
     columns: {
       id: 'INTEGER',
       title: 'TEXT NOT NULL',
@@ -92,6 +105,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
       bookshelves: 'TEXT NOT NULL',
       languages: 'TEXT NOT NULL',
       summaries: 'TEXT NOT NULL',
+      source_notes: 'TEXT',
       formats: 'TEXT NOT NULL',
       copyright: 'INTEGER',
       media_type: 'TEXT NOT NULL',
@@ -137,6 +151,7 @@ export function rowFromBook(book: Book): CatalogBookRow {
     bookshelves: JSON.stringify(book.bookshelves),
     languages: JSON.stringify(book.languages),
     summaries: JSON.stringify(book.summaries),
+    source_notes: book.source_notes === null ? null : JSON.stringify(book.source_notes),
     formats: JSON.stringify(book.formats),
     copyright: book.copyright === null ? null : Number(book.copyright),
     media_type: book.media_type,
@@ -161,6 +176,8 @@ function parseJson<T>(value: unknown): T {
 /** Translate a stored row back into the normalized book shape the live path returns. */
 export function bookFromRow(row: MirrorRow): Book {
   const summaries = parseJson<string[]>(row.summaries);
+  const formats = parseJson<Record<string, string>>(row.formats);
+  const media_type = String(row.media_type);
   return {
     id: Number(row.id),
     title: String(row.title),
@@ -171,11 +188,13 @@ export function bookFromRow(row: MirrorRow): Book {
     bookshelves: parseJson<string[]>(row.bookshelves),
     languages: parseJson<string[]>(row.languages),
     copyright: row.copyright === null ? null : Boolean(row.copyright),
-    media_type: String(row.media_type),
+    media_type,
     download_count: Number(row.download_count),
     summaries,
     summary: summaries[0] ?? null,
-    formats: parseJson<Record<string, string>>(row.formats),
+    source_notes: row.source_notes == null ? null : parseJson<string[]>(row.source_notes),
+    formats,
+    is_readable: isReadable({ media_type, formats }),
     has_plain_text: Boolean(row.has_plain_text),
   };
 }

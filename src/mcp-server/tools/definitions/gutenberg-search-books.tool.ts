@@ -11,7 +11,7 @@ import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   title: 'Search Gutenberg Books',
   description:
-    'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and author name with query words; filters by topic (subject or bookshelf keyword), language, author lifespan, or a specific list of Gutenberg IDs. Results are ordered by popularity (download count) by default. Returns book ID, title, authors, languages, subjects, and download count — use gutenberg_get_book for the full formats map before fetching text.',
+    'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and author name with query words; filters by topic (subject or bookshelf keyword), language, author lifespan, or a specific list of Gutenberg IDs. Default popularity ordering uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -51,7 +51,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       .enum(['popular', 'ascending', 'descending'])
       .default('popular')
       .describe(
-        'Result ordering. "popular" (default) sorts by download count descending. "ascending" and "descending" sort by Gutenberg ID number.',
+        'Result ordering. "popular" (default) sorts by downloads in the last 30 days at the source snapshot, descending. "ascending" and "descending" sort by Gutenberg ID number.',
       ),
     ids: z
       .array(z.number().int().positive())
@@ -103,13 +103,16 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
             subjects: z.array(z.string()).describe('Library of Congress subject headings.'),
             download_count: z
               .number()
-              .describe(
-                'Total downloads from Project Gutenberg — a real popularity signal reflecting actual reader interest.',
-              ),
+              .describe('Downloads in the last 30 days at the source snapshot.'),
             has_plain_text: z
               .boolean()
               .describe(
-                'True if the book has media_type "Text" AND a UTF-8 text/plain format available — prerequisite for gutenberg_get_text.',
+                'True for Text records with UTF-8 plain text; HTML-only editions can still have is_readable=true.',
+              ),
+            is_readable: z
+              .boolean()
+              .describe(
+                'True for non-Sound records with UTF-8 plain text or HTML supported by gutenberg_get_text.',
               ),
           })
           .describe('Book entry.'),
@@ -200,6 +203,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
         subjects: b.subjects,
         download_count: b.download_count,
         has_plain_text: b.has_plain_text,
+        is_readable: b.is_readable,
       })),
       totalCount: result.totalCount,
       page: result.page,
@@ -228,7 +232,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
           : 'Unknown';
       lines.push(`**[${book.id}]** ${book.title}`);
       lines.push(
-        `  Authors: ${authorStr} | Lang: ${book.languages.join(', ')} | Downloads: ${book.download_count.toLocaleString()} | Text: ${book.has_plain_text ? 'Yes' : 'No'}`,
+        `  Authors: ${authorStr} | Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
       );
       // Unconditional: structuredContent carries `subjects: []` verbatim, so a
       // content[]-only client needs the empty case stated, not the line dropped.

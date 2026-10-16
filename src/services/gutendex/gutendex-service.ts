@@ -22,6 +22,7 @@ import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
 import {
   type Book,
   hasPlainText,
+  isReadable,
   type RawBook,
   type RawBooksPage,
   type RawPerson,
@@ -106,6 +107,8 @@ function normalizeBook(raw: RawBook): Book {
     summaries: raw.summaries ?? [],
     formats: raw.formats,
     has_plain_text: hasPlainText(raw),
+    is_readable: isReadable(raw),
+    source_notes: null,
   };
 }
 

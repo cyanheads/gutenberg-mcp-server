@@ -8,9 +8,10 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { SAXParser } from 'parse5-sax-parser';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { Book } from '@/services/gutendex/types.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
@@ -61,40 +62,69 @@ function normalizeWhitespace(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
 }
 
-/**
- * Named character references this converter resolves; anything else is prose furniture.
- * A `Map` rather than an object literal: the reference name comes from the book text, so
- * a plain object would resolve `&constructor;` off `Object.prototype` and splice a
- * stringified native function into the reader's chunk.
- */
-const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
-  ['amp', '&'],
-  ['apos', "'"],
-  ['gt', '>'],
-  ['lt', '<'],
-  ['quot', '"'],
+/** Block boundaries in the literary stream; inline markup leaves prose intact. */
+const BLOCK_TAGS = new Set([
+  'p',
+  'div',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'hr',
+  'br',
+  'li',
+  'blockquote',
+  'pre',
 ]);
 
-/**
- * Matches one decimal numeric reference or one lowercase named reference.
- * Decoding every reference in a single pass is what keeps each one decoded
- * exactly once: a sequential `&amp;` → `&` replacement followed by `&lt;` → `<`
- * re-decodes the ampersand it just produced, so `&amp;lt;` — prose meaning the
- * literal text `&lt;` — would collapse to `<`.
- */
-const ENTITY_RE = /&(?:#(\d+)|([a-z]+));/g;
-
-/**
- * Minimal HTML-to-text conversion: strips tags, decodes character references,
- * and preserves paragraph structure.
- */
+/** Tokenize HTML once: references decode once, independently of presentation. */
 function htmlToText(html: string): string {
-  return html
-    .replace(/<\/?(?:p|div|h[1-6]|hr|br)\b[^>]*>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(ENTITY_RE, (_match, decimal: string | undefined, name: string | undefined) =>
-      name === undefined ? String.fromCharCode(Number(decimal)) : (NAMED_ENTITIES.get(name) ?? ' '),
-    );
+  const chunks: string[] = [];
+  const parser = new SAXParser();
+  let excluded: string | undefined;
+  let templateDepth = 0;
+  let cellsInRow = 0;
+  const rowBoundary = () => {
+    if (!chunks.at(-1)?.endsWith('\n')) chunks.push('\n');
+  };
+  parser.on('startTag', ({ tagName }) => {
+    if (excluded) return;
+    if (tagName === 'template') {
+      templateDepth += 1;
+      return;
+    }
+    if (templateDepth > 0) return;
+    if (tagName === 'title' || tagName === 'script' || tagName === 'style') {
+      excluded = tagName;
+    } else if (BLOCK_TAGS.has(tagName)) {
+      chunks.push('\n\n');
+    } else if (tagName === 'tr' || tagName === 'table') {
+      rowBoundary();
+      cellsInRow = 0;
+    } else if (tagName === 'td' || tagName === 'th') {
+      if (cellsInRow > 0) chunks.push('\t');
+      cellsInRow += 1;
+    }
+  });
+  parser.on('endTag', ({ tagName }) => {
+    if (excluded) {
+      if (tagName === excluded) excluded = undefined;
+      return;
+    }
+    if (templateDepth > 0) {
+      if (tagName === 'template') templateDepth -= 1;
+      return;
+    }
+    if (tagName === 'tr' || tagName === 'table') rowBoundary();
+    else if (BLOCK_TAGS.has(tagName)) chunks.push('\n\n');
+  });
+  parser.on('text', ({ text }) => {
+    if (!excluded && templateDepth === 0) chunks.push(text);
+  });
+  parser.end(html);
+  return chunks.join('');
 }
 
 /**
@@ -168,8 +198,13 @@ export class GutenbergTextService {
    * carries the operator's configured mirror host; the original error stays on
    * `cause` for server-side logs. A caller cancel passes through unchanged.
    */
-  private fetchRaw(url: string, id: number, ctx: Context): Promise<string> {
-    return withUpstreamDeadline(
+  private async fetchRaw(
+    url: string,
+    id: number,
+    format: SourceFormat,
+    ctx: Context,
+  ): Promise<string> {
+    const response = await withUpstreamDeadline(
       ctx,
       {
         budgetMs: TEXT_BUDGET_MS,
@@ -183,9 +218,38 @@ export class GutenbergTextService {
               parentContext: ctx,
               operation: 'GutenbergTextService.fetchRaw',
             });
-            const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, { signal });
-            const buffer = await response.arrayBuffer();
-            return new TextDecoder('utf-8').decode(buffer);
+            try {
+              const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, { signal });
+              const buffer = await response.arrayBuffer();
+              return {
+                raw: new TextDecoder('utf-8').decode(buffer),
+                mediaType: response.headers
+                  .get('content-type')
+                  ?.split(';')[0]
+                  ?.trim()
+                  .toLowerCase(),
+              };
+            } catch (error) {
+              if (ctx.signal.aborted) throw error;
+              if (
+                error instanceof McpError &&
+                typeof error.data?.status === 'number' &&
+                error.data.status >= 400 &&
+                error.data.status < 500 &&
+                error.data.status !== 408 &&
+                error.data.status !== 429
+              ) {
+                const missing = error.data.status === 404;
+                const reason = missing ? 'text_file_not_found' : 'text_fetch_rejected';
+                throw new McpError(
+                  missing ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.Forbidden,
+                  `The Gutenberg mirror ${missing ? 'has no text file' : 'rejected the text request'} for book ${id}.`,
+                  { reason, ...ctx.recoveryFor(reason) },
+                  { cause: error },
+                );
+              }
+              throw error;
+            }
           },
           {
             operation: 'GutenbergTextService.fetchRaw',
@@ -193,6 +257,39 @@ export class GutenbergTextService {
             signal,
           },
         ),
+    );
+    // Mirrors can label valid books as generic binary or another incorrect MIME
+    // type. A header alone cannot establish that the literary body is invalid.
+    let jsonError = false;
+    if (response.mediaType === 'application/json' && response.raw.trimStart().startsWith('{')) {
+      try {
+        const document: unknown = JSON.parse(response.raw);
+        jsonError =
+          document !== null &&
+          typeof document === 'object' &&
+          Object.keys(document).length === 1 &&
+          'error' in document &&
+          typeof document.error === 'string';
+      } catch {
+        // A mislabeled literary document need not be valid JSON.
+      }
+    }
+    if (
+      jsonError ||
+      (format !== 'text/html' &&
+        /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(response.raw))
+    ) {
+      throw this.invalidResponse(id, ctx);
+    }
+    return response.raw;
+  }
+
+  /** Invalid upstream content is distinct from a retryable transport outage. */
+  private invalidResponse(id: number, ctx: Context): McpError {
+    return new McpError(
+      JsonRpcErrorCode.SerializationError,
+      `The Gutenberg mirror returned an invalid text document for book ${id}.`,
+      { reason: 'invalid_text_response', ...ctx.recoveryFor('invalid_text_response') },
     );
   }
 
@@ -233,7 +330,7 @@ export class GutenbergTextService {
    * when the mirror ladder exhausts its budget.
    */
   async fetchAndCacheText(book: Book, id: number, ctx: Context): Promise<CachedText> {
-    const cacheKey = `gutenberg/text/${id}`;
+    const cacheKey = `gutenberg/text/v2/${id}`;
 
     const cached = await ctx.state.get<CachedText>(cacheKey);
     if (cached) {
@@ -260,9 +357,20 @@ export class GutenbergTextService {
     // than in a catch here leaves the two ctx.state cache operations around this
     // call outside the failure class — a storage error bubbles as itself instead
     // of being relabelled an upstream outage.
-    const raw = await this.fetchRaw(resolved.url, id, ctx);
+    const raw = await this.fetchRaw(resolved.url, id, resolved.format, ctx);
 
     const processed = this.processRaw(raw, resolved.format);
+
+    /** Match complete, short server templates rather than keywords within prose. */
+    const document = processed.text.trim().replace(/\s+/g, ' ');
+    const failureTemplate =
+      /^(?:Service unavailable[;.]? retry later\.?|(?:404 Not Found|403 Forbidden|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-out)(?: (?:nginx|Apache(?: Server)?))?)$/i;
+    if (
+      !document ||
+      (resolved.format === 'text/html' && document.length <= 200 && failureTemplate.test(document))
+    ) {
+      throw this.invalidResponse(id, ctx);
+    }
 
     const entry: CachedText = {
       text: processed.text,

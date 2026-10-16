@@ -35,10 +35,9 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .number()
       .int()
       .min(1)
-      .max(50000)
       .default(20000)
       .describe(
-        'Maximum number of characters to return in this chunk. Default 20,000 (~4–5 pages of prose). Increase toward 50,000 for large context windows. The actual returned length may be slightly less than limit when a natural paragraph boundary is found within 500 characters of the limit — check the length field in the response for the actual character count returned.',
+        'Requested maximum characters. Default 20,000 (~4–5 pages of prose); requests above 50,000 are capped locally at 50,000. Paragraph-boundary trimming may return less than the applied limit — use length for continuation.',
       ),
   }),
 
@@ -52,6 +51,10 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       ),
     offset: z.number().describe('Character offset where this chunk begins.'),
     length: z.number().describe('Number of characters in this chunk.'),
+    requestedLimit: z
+      .number()
+      .describe('Positive integral character limit requested by the caller, before capping.'),
+    appliedLimit: z.number().describe('Character limit applied to this chunk, at most 50,000.'),
     totalChars: z
       .number()
       .describe(
@@ -78,6 +81,30 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
   }),
 
   errors: [
+    {
+      reason: 'text_file_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The catalog entry exists but its mirror text file returned HTTP 404.',
+      recovery:
+        'Inspect gutenberg_get_book for another readable edition; this mirror file is missing.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'text_fetch_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The mirror permanently rejected this text request.',
+      recovery:
+        'Inspect gutenberg_get_book for another edition. Repeating the same request will not resolve a permanent mirror rejection.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'invalid_text_response',
+      code: JsonRpcErrorCode.SerializationError,
+      when: 'The mirror returned an empty document, HTML on a plain-text path, or recognizable server failure document.',
+      recovery:
+        'Try another readable edition from gutenberg_search_books; the mirror did not supply a valid text document.',
+      thrownBy: 'service',
+    },
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
@@ -109,7 +136,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'text_fetch_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Gutenberg file server returned an error or did not respond within the timeout.',
+      when: 'The Gutenberg mirror had a transient failure or did not respond within the request budget.',
       recovery:
         'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
@@ -173,7 +200,8 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     }
 
     // Step 3: Chunk the text
-    const chunk = getGutenbergTextService().chunkText(cached, input.offset, input.limit);
+    const appliedLimit = Math.min(input.limit, 50000);
+    const chunk = getGutenbergTextService().chunkText(cached, input.offset, appliedLimit);
 
     const provenance = `Project Gutenberg eBook #${input.id}: ${book.title} — https://www.gutenberg.org/ebooks/${input.id} — License: www.gutenberg.org/license`;
 
@@ -183,6 +211,8 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       text: chunk.text,
       offset: chunk.offset,
       length: chunk.length,
+      requestedLimit: input.limit,
+      appliedLimit,
       totalChars: chunk.totalChars,
       remainingChars: chunk.remainingChars,
       hasMore: chunk.hasMore,
@@ -205,8 +235,18 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     );
     lines.push('');
     lines.push('---');
+    lines.push(
+      `Requested limit: ${result.requestedLimit.toLocaleString()} | Applied limit: ${result.appliedLimit.toLocaleString()}`,
+    );
     lines.push('');
-    lines.push(result.text);
+    let longestRun = 0;
+    let run = 0;
+    for (const character of result.text) {
+      run = character === '`' ? run + 1 : 0;
+      longestRun = Math.max(longestRun, run);
+    }
+    const fence = '`'.repeat(Math.max(3, longestRun + 1));
+    lines.push(`${fence}text\n${result.text}\n${fence}`);
     lines.push('');
     lines.push('---');
 

@@ -30,7 +30,7 @@ function renderPeople(
 export const gutenbergGetBook = tool('gutenberg_get_book', {
   title: 'Get Gutenberg Book',
   description:
-    'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with birth/death years), translators, editors, subjects, bookshelves, languages, copyright status, and the full formats map with download URLs for each available format (plain text, HTML, EPUB, cover image, etc.). Use this before gutenberg_get_text to confirm a plain-text format is available and to get the direct download URL.',
+    'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with birth/death years), translators, editors, source bibliographic notes, subjects, bookshelves, languages, copyright status, and the full formats map with download URLs (plain text, HTML, EPUB, cover image, etc.). Use is_readable before gutenberg_get_text; source_notes may identify specific editions.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -98,9 +98,24 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     media_type: z
       .string()
       .describe(
-        '"Text" for readable books, "Sound" for audio books. Only "Text" books have plain-text content available for gutenberg_get_text.',
+        'Source media type, such as "Text" or "Sound" (audio). Use is_readable to check reader support.',
       ),
-    download_count: z.number().describe('Total downloads — popularity signal.'),
+    download_count: z
+      .number()
+      .describe(
+        'Downloads in the last 30 days at the source snapshot, used for popularity ranking.',
+      ),
+    source_notes: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'Source-provided RDF bibliographic notes in document order, including explicit edition references. [] means inspected with no notes; null means unavailable from this source.',
+      ),
+    is_readable: z
+      .boolean()
+      .describe(
+        'True for non-Sound records with a supported UTF-8 plain-text or HTML format for gutenberg_get_text.',
+      ),
     summary: z
       .string()
       .nullable()
@@ -120,7 +135,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     has_plain_text: z
       .boolean()
       .describe(
-        'True if media_type is "Text" AND a UTF-8 text/plain format ("text/plain; charset=utf-8") is present in formats — prerequisite for gutenberg_get_text.',
+        'True if media_type is "Text" and "text/plain; charset=utf-8" is present. HTML-only editions can still have is_readable=true.',
       ),
   }),
 
@@ -176,6 +191,8 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       summaries: book.summaries,
       formats: book.formats,
       has_plain_text: book.has_plain_text,
+      is_readable: book.is_readable,
+      source_notes: book.source_notes,
     };
   },
 
@@ -184,7 +201,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
 
     lines.push(`# ${result.title}`);
     lines.push(
-      `**ID:** ${result.id} | **Media:** ${result.media_type} | **Downloads:** ${result.download_count.toLocaleString()}`,
+      `**ID:** ${result.id} | **Media:** ${result.media_type} | **Downloads in the last 30 days (source snapshot):** ${result.download_count.toLocaleString()}`,
     );
 
     lines.push(`**Authors:** ${renderPeople(result.authors)}`);
@@ -202,6 +219,9 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
 
     lines.push('');
     lines.push(`**Summary:** ${result.summary ?? 'Not available'}`);
+    lines.push(
+      `**Source notes:** ${result.source_notes === null ? 'Not available' : result.source_notes.length === 0 ? 'None' : result.source_notes.join('\n')}`,
+    );
 
     /**
      * `summary` is already the first entry of `summaries`; repeating it would
@@ -221,7 +241,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
 
     lines.push('');
     lines.push(
-      `**Plain text available:** ${result.has_plain_text ? 'Yes — use gutenberg_get_text' : 'No'}`,
+      `**Plain text available:** ${result.has_plain_text ? 'Yes' : 'No'} | Readable: ${result.is_readable ? 'Yes — use gutenberg_get_text' : 'No'}`,
     );
 
     lines.push('');

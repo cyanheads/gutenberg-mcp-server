@@ -141,6 +141,33 @@ describe('GutendexService — catalog ladder', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['Text', { 'text/html': 'https://example/book.html' }, true, false],
+    ['Text', { 'text/plain; charset=utf-8': 'https://example/book.txt' }, true, true],
+    ['Sound', { 'text/html': 'https://example/readme.html' }, false, false],
+    ['Image', { 'text/html': 'https://example/book.html' }, true, false],
+    ['Text', { 'text/plain; charset=us-ascii': 'https://example/book.txt' }, false, false],
+  ])(
+    'normalizes %s readability with formats %j on live and cached records',
+    async (media_type, formats, readable, plain) => {
+      http.route({
+        match: ANY_CATALOG_URL,
+        respond: () => Response.json({ ...rawBook, media_type, formats }),
+      });
+      const service = makeService();
+      const ctx = createMockContext({ errors: gutenbergGetBook.errors });
+      for (let i = 0; i < 2; i++) {
+        const result = await service.getBook(1342, ctx);
+        expect(result).toMatchObject({
+          is_readable: readable,
+          has_plain_text: plain,
+          source_notes: null,
+        });
+      }
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
   it('returns a parsed page on the first attempt', async () => {
     http.route({
       match: ANY_CATALOG_URL,

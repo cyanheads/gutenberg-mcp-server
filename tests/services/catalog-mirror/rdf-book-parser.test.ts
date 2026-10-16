@@ -30,6 +30,27 @@ function parse(id: number): Book {
 }
 
 describe('parseBookRdf — field mapping', () => {
+  it('preserves direct bibliographic notes and excludes nested file descriptions', () => {
+    expect(parse(84)).toMatchObject({
+      source_notes: expect.arrayContaining([
+        expect.stringContaining('#41445 (1818 ed.) and #42324 (1831 ed.)'),
+      ]),
+    });
+    expect(parse(84).source_notes).not.toContain('en.wikipedia');
+    const xml =
+      '<rdf:RDF><pgterms:ebook><dcterms:title>Notes</dcterms:title><dcterms:description>Édition 1831 — #42324</dcterms:description><dcterms:hasFormat><pgterms:file><dcterms:description>Nested noise</dcterms:description></pgterms:file></dcterms:hasFormat><dcterms:description>First edition #41445</dcterms:description></pgterms:ebook></rdf:RDF>';
+    expect(parseBookRdf(xml, 1)?.source_notes).toEqual([
+      'Édition 1831 — #42324',
+      'First edition #41445',
+    ]);
+    expect(
+      parseBookRdf(
+        '<rdf:RDF><pgterms:ebook><dcterms:title>No notes</dcterms:title></pgterms:ebook></rdf:RDF>',
+        2,
+      )?.source_notes,
+    ).toEqual([]);
+  });
+
   it('maps a complete Text record (Frankenstein, 84)', () => {
     const book = parse(84);
     expect(book.id).toBe(84);
@@ -201,9 +222,9 @@ describe('parseBookRdf — parity with the live Gutendex record', () => {
     },
   );
 
-  it('adds only the two computed fields on top of the live shape', () => {
+  it('adds computed fields and RDF-only bibliographic notes to the live shape', () => {
     const live = JSON.parse(readFileSync(new URL('84.json', GUTENDEX_DIR), 'utf8')) as object;
     const extra = Object.keys(parse(84)).filter((key) => !(key in live));
-    expect(extra.sort()).toEqual(['has_plain_text', 'summary']);
+    expect(extra.sort()).toEqual(['has_plain_text', 'is_readable', 'source_notes', 'summary']);
   });
 });
