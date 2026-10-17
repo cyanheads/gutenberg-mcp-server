@@ -1,6 +1,6 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-10-17 22:27:05
+Generated on: 2026-10-17 22:31:42
 
 ```text
 gutenberg-mcp-server/
@@ -25,6 +25,7 @@ gutenberg-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
