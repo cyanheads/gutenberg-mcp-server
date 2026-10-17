@@ -46,49 +46,33 @@ Project Gutenberg's library of 78,000+ public-domain books. Search by title, aut
 
 ### `gutenberg_search_books` <sub>tool</sub>
 
-- Every nonblank `query` word matches a literal case-insensitive title/author substring; `topic` matches a phrase in subjects/bookshelves. All words apply on the ready local mirror; live fallback rejects queries longer than four words
-- Filters: `languages` (ISO 639-1 codes), `author_year_start`/`author_year_end` lifespan range, `ids` for a selected ID list, `mime_type` for a format-key prefix, and `copyright` for any of `"true"`, `"false"`, `"null"`. False means public domain in the USA; null stays unknown
-- `ids: []` selects nothing without querying either catalog. Blank query/topic/MIME and empty language/copyright lists mean unset
-- `sort`: `popular` (default, by downloads in the last 30 days at the source snapshot) or `ascending`/`descending` by Gutenberg ID
-- Paginated — up to 32 books per page; `totalCount` and `hasMore` drive further pages
-- Each result carries `is_readable` to select UTF-8 plain-text or HTML editions supported by `gutenberg_get_text`; `has_plain_text` specifically reports UTF-8 plain text on Text records
-- Empty first-page results succeed with zero totals and a notice. Typed enrichment echoes normalized criteria and defaults on both output surfaces
-- Typed failures: `query_requires_mirror`, `page_out_of_range`, `catalog_unavailable`
+- Filters: `query` (title/author words), `topic`, `languages` (ISO 639-1), `author_year_start`/`author_year_end`, `ids`, `mime_type`, and `copyright` (`"true"`, `"false"`, `"null"`; false means public domain in the USA). Live fallback rejects queries over four words
+- `sort` is `popular` (default) or `ascending`/`descending` by Gutenberg ID. Up to 32 books per page; use `totalCount` and `hasMore` to page
+- Each result carries `is_readable` (readable by `gutenberg_get_text`) and `has_plain_text`. Fails with `query_requires_mirror`, `page_out_of_range`, or `catalog_unavailable`
 
 ---
 
 ### `gutenberg_get_book` <sub>tool</sub>
 
-- Returns the full `formats` map (MIME type → download URL) — plain text, HTML, EPUB, cover image
-- Authors, translators, and editors each carry birth/death years
-- `is_readable` follows the reader's non-audio guard and supported UTF-8 plain-text or HTML formats; `has_plain_text` specifically reports UTF-8 plain text on Text records
-- `source_notes` preserves RDF bibliographic notes and explicit edition IDs verbatim. `[]` means the RDF was inspected and had none; `null` means unavailable from Gutendex or an older mirror row. Existing mirror rows remain readable, with notes filled on the next normal harvest
-- `download_count` is downloads in the last 30 days at the source snapshot, not a lifetime or live count
-- `summary` is the first entry of Gutendex's `summaries` array — both are `null`/empty when Gutendex has none
-- Typed failures: `not_found`, `catalog_unavailable`
+- Returns the full `formats` map (MIME type → download URL) and authors, translators, and editors with birth/death years
+- Also carries `is_readable`, `has_plain_text`, `summary`, `source_notes`, and `download_count` (downloads in the last 30 days, not lifetime)
+- Fails with `not_found` or `catalog_unavailable`
 
 ---
 
 ### `gutenberg_get_text` <sub>tool</sub>
 
-- `offset`/`limit` chunking (positive integral requested limit, default 20,000; capped locally at 50,000) for works that routinely run 500KB–2MB. `requestedLimit` and `appliedLimit` report both limits
-- Strips the standard Gutenberg license header and footer before chunking
-- Prefers UTF-8 plain text; falls back to an HTML-to-text conversion (`sourceFormat` reports which)
-- HTML extraction preserves Unicode, table boundaries, and literal character references in a single decoding pass; rendered literary text uses collision-safe fences without changing structured text or offsets
-- Response carries `totalChars`, `length`, `remainingChars`, `hasMore` — use `length`, not `limit`, to compute the next `offset`, since paragraph-boundary trimming can return slightly less than requested
-- `provenance` carries the Gutenberg ID, title, and license URL for attribution
-- Typed failures: `not_found`, `audio_book` (refuses `media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_file_not_found` (mirror HTTP 404), `text_fetch_rejected` (permanent HTTP rejection), `invalid_text_response` (empty or recognizable non-book document), `text_fetch_failed` (transient failure), `catalog_unavailable`
+- Reads a book in `offset`/`limit` chunks (default `limit` 20,000, capped at 50,000), with the Gutenberg license header and footer stripped. `requestedLimit` and `appliedLimit` report both
+- Prefers UTF-8 plain text and falls back to HTML converted to text; `sourceFormat` says which. Returns `totalChars`, `length`, `remainingChars`, `hasMore`, and `provenance` (ID, title, license URL). Use `length`, not `limit`, to compute the next `offset`
+- Fails with `not_found`, `audio_book` (`media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_file_not_found`, `text_fetch_rejected`, `invalid_text_response`, `text_fetch_failed`, or `catalog_unavailable`
 
 ---
 
 ### `gutenberg_browse_popular` <sub>tool</sub>
 
-- Returns up to 32 titles (`limit`, default 20) ordered by downloads in the last 30 days at the source snapshot, most popular first. Larger positive integral requests are capped locally at 32; `requestedLimit` and `appliedLimit` report both limits
-- Optional `languages`, `topic`, `mime_type`, and `copyright` filters, applied together with the same semantics as search
-- `totalInCatalog` gives full context (e.g. "top 20 of 60,000")
-- Enrichment echoes normalized criteria and reports actual truncation and the least-popular book's source-snapshot downloads. A typed `continuation` names `gutenberg_search_books` and executable arguments preserving every filter and popular sort. It restarts at page 1 when the local cap cuts a page, repeating shown books rather than skipping unseen ones; otherwise it advances to the next page
-- Empty results succeed with zero totals, requested/applied caps, `shown: 0`, `truncated: false`, and a notice on both output surfaces
-- Typed failure: `catalog_unavailable`
+- Returns up to 32 titles (`limit`, default 20), most downloaded in the last 30 days first. `requestedLimit` and `appliedLimit` report the cap
+- Optional `languages`, `topic`, `mime_type`, and `copyright` filters work as in search. `totalInCatalog` gives the full count
+- Output reports truncation and carries a `continuation` pointing at `gutenberg_search_books`. Empty results succeed with a notice; fails with `catalog_unavailable`
 
 ---
 
@@ -98,19 +82,16 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 Gutenberg-specific:
 
-- Catalog discovery uses the ready local RDF mirror, applying all filters before counts and 32-book pages. Empty results stay local; a cold or unreadable mirror uses [Gutendex](https://gutendex.com/). Existing databases receive a bounded, one-time Unicode-search backfill from stored rows without a harvest
-- Live catalog attempts use the remaining shared 15-second budget, preserving fast-failure retries and caller cancellation; catalog plus text retrieval stays within 50 seconds of upstream budgets
-- Single-book lookups (`gutenberg_get_book`, `gutenberg_get_text`) read from a local SQLite+FTS5 catalog mirror when it holds the record, falling back to the live Gutendex API otherwise
-- Full plain-text retrieval from a Project Gutenberg content mirror that permits automated access, with transparent UTF-8/HTML fallback
-- Tenant-scoped text caching — book text is fetched once per tenant and served from cache for subsequent chunk reads
+- Searches and lookups read a local SQLite+FTS5 catalog mirror, falling back to [Gutendex](https://gutendex.com/) when the mirror is cold or missing a record
+- Full plain-text retrieval from a Project Gutenberg content mirror, with UTF-8/HTML fallback
+- Book text is cached per tenant, so later chunk reads skip the fetch
 - No API key required
 
 Agent-friendly output:
 
-- `is_readable` on every search/browse result lets agents select supported UTF-8 plain-text or HTML editions before text retrieval
-- Precise chunking contract on `gutenberg_get_text` — `offset`, `length`, `totalChars`, `remainingChars`, `hasMore` for reliable sequential reads
-- `provenance` and discriminated `sourceFormat` fields on every text response, for attribution and fidelity awareness
-- `gutenberg_browse_popular` enrichment reports truncation state and the downloads-in-the-last-30-days ceiling at the source snapshot for omitted results
+- `is_readable` on every search and browse result flags editions `gutenberg_get_text` can read
+- `offset`, `length`, `totalChars`, `remainingChars`, and `hasMore` support reliable sequential reads
+- `provenance` and `sourceFormat` on every text response cover attribution and fidelity
 
 ---
 
@@ -232,10 +213,10 @@ cp .env.example .env
 
 | Variable | Description | Default |
 |:---------|:------------|:--------|
-| `GUTENDEX_BASE_URL` | Base URL for the Gutendex catalog API. Override for self-hosted instances. | `https://gutendex.com/books/` |
-| `GUTENBERG_TEXT_BASE_URL` | Base URL for a Project Gutenberg content mirror serving the `/cache/epub` file tree. Override to use a different mirror. | `https://gutenberg.pglaf.org` |
-| `GUTENBERG_MIRROR_PATH` | SQLite catalog path shared by the server and mirror lifecycle commands; use a persistent volume in containers. | `./.mirror/gutenberg-catalog.sqlite` |
-| `GUTENBERG_MIRROR_REFRESH_CRON` | Optional in-process refresh cron. A host scheduler running `bun run mirror:refresh` is preferred. | Unset |
+| `GUTENDEX_BASE_URL` | Gutendex catalog API base URL. | `https://gutendex.com/books/` |
+| `GUTENBERG_TEXT_BASE_URL` | Content mirror serving the `/cache/epub` file tree. | `https://gutenberg.pglaf.org` |
+| `GUTENBERG_MIRROR_PATH` | SQLite catalog path; use a persistent volume in containers. | `./.mirror/gutenberg-catalog.sqlite` |
+| `GUTENBERG_MIRROR_REFRESH_CRON` | Cron schedule for in-process catalog refresh. | Unset |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. Overrides the `stateless` posture the server declares in `createApp()`. | `stateless` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
@@ -245,7 +226,7 @@ cp .env.example .env
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
-Initialize the local catalog with `bun run mirror:init`, then check it with `bun run mirror:verify`. Use the same `GUTENBERG_MIRROR_PATH` for these commands and the running server. Discovery uses the mirror after its first complete harvest; an interrupted initial harvest stays on live fallback and can be resumed by rerunning `mirror:init`. Startup never harvests automatically. Run `bun run mirror:refresh` periodically through a host scheduler, or set `GUTENBERG_MIRROR_REFRESH_CRON` for in-process refresh. Refresh reads the bulk RDF archive and preserves an already completed catalog while it runs. Keep the database directory on persistent storage so restarts retain it.
+Build the local catalog with `bun run mirror:init` and check it with `bun run mirror:verify`. The server never harvests on startup, and uses Gutendex until the first harvest completes. Keep the catalog up to date with `bun run mirror:refresh` on a host scheduler, or set `GUTENBERG_MIRROR_REFRESH_CRON`.
 
 ---
 
