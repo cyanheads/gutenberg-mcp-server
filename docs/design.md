@@ -6,10 +6,10 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `gutenberg_search_books` | Search the Project Gutenberg catalog by title/author, topic, language, author lifespan, or ID list | `query`, `topic`, `languages`, `author_year_start`, `author_year_end`, `sort`, `ids`, `page` | `readOnlyHint: true` |
+| `gutenberg_search_books` | Search the Project Gutenberg catalog by title/author, topic, language, author lifespan, ID list, format, or copyright status | `query`, `topic`, `languages`, `author_year_start`, `author_year_end`, `sort`, `ids`, `page`, `mime_type`, `copyright` | `readOnlyHint: true` |
 | `gutenberg_get_book` | Fetch full metadata for a single book by Gutenberg ID | `id` | `readOnlyHint: true`, `idempotentHint: true` |
 | `gutenberg_get_text` | Retrieve the plain-text content of a book, stripped of the license boilerplate, with offset/limit chunking | `id`, `offset`, `limit` | `readOnlyHint: true`, `idempotentHint: true` |
-| `gutenberg_browse_popular` | Return the most-downloaded books, optionally filtered by language or topic | `languages`, `topic`, `limit` | `readOnlyHint: true` |
+| `gutenberg_browse_popular` | Return the most-downloaded books, optionally filtered by language, topic, format, or copyright status | `languages`, `topic`, `mime_type`, `copyright`, `limit` | `readOnlyHint: true` |
 
 ### Resources
 
@@ -23,7 +23,7 @@ None. This is a data-access server without recurring agent interaction patterns 
 
 ## Overview
 
-An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. Catalog search and metadata come from the Gutendex API (keyless JSON); full book text comes from Gutenberg's plain-text file servers. The distinguishing capability — absent from every book-metadata server — is `gutenberg_get_text`: it fetches, strips boilerplate, and returns the actual literary content of a work in context-budget-safe chunks. No API key required.
+An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. Catalog discovery uses the ready local RDF mirror, with the keyless Gutendex API as fallback; metadata uses the mirror when it holds the requested ID. Full book text comes from Gutenberg's content mirror. `gutenberg_get_text` fetches, strips boilerplate, and returns the literary content of a work in context-budget-safe chunks. No API key required.
 
 **Audience:** Readers, students, literature researchers, writers, and AI agents doing textual analysis, quote-finding, or close reading of classic works.
 
@@ -54,10 +54,11 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
-| `GutendexService` | Gutendex catalog API (`gutendex.com/books/`) | `gutenberg_search_books`, `gutenberg_get_book`, `gutenberg_browse_popular` |
+| `CatalogMirrorService` | Local SQLite catalog harvested from Gutenberg's bulk RDF archive | Catalog discovery and metadata through `GutendexService` |
+| `GutendexService` | Local catalog mirror with Gutendex API fallback (`gutendex.com/books/`) | All four tools; `gutenberg_get_text` uses it for metadata |
 | `GutenbergTextService` | Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) | `gutenberg_get_text` |
 
-Both services are thin HTTP clients with retry, timeout, and response-parse logic. No shared state beyond an optional in-process response cache. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
+The catalog mirror persists across restarts; live catalog and text responses use tenant-scoped caching. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
 
 ---
 
@@ -67,8 +68,10 @@ Both services are thin HTTP clients with retry, timeout, and response-parse logi
 |:--------|:---------|:------------|
 | `GUTENDEX_BASE_URL` | No | Override Gutendex base URL (default: `https://gutendex.com/books/`). Gutendex is self-hostable — useful for private instances. |
 | `GUTENBERG_TEXT_BASE_URL` | No | Override the Project Gutenberg content mirror (default: `https://gutenberg.pglaf.org`, a mirror that permits automated access — see Design Decisions). |
+| `GUTENBERG_MIRROR_PATH` | No | Persistent SQLite catalog path shared by the server and lifecycle commands (default: `./.mirror/gutenberg-catalog.sqlite`). |
+| `GUTENBERG_MIRROR_REFRESH_CRON` | No | Optional in-process refresh schedule; a host scheduler running `mirror:refresh` is preferred. |
 
-No API keys. Both overrides exist to support self-hosted Gutendex instances and Gutenberg mirrors, which the project explicitly encourages.
+No API keys. URL overrides support self-hosted Gutendex instances and Gutenberg mirrors.
 
 ---
 
@@ -311,16 +314,18 @@ tool('gutenberg_get_text', {
 
 ### `gutenberg_browse_popular`
 
-**Purpose:** Return the most-downloaded public-domain books, with optional language or topic filters. Entry point for discovery ("what are the most-read classics?").
+**Purpose:** Return the most-downloaded books, with optional language, topic, MIME-prefix or copyright filters. Entry point for discovery ("what are the most-read classics?").
 
 **Source:** the same mirror-first search path, first page only (up to 32), with popular sorting and language/topic/MIME/copyright filters. Truncated responses carry a typed `continuation` with tool `gutenberg_search_books` and executable `arguments` preserving all filters. When the local cap cuts a page, continuation repeats page 1; a fully shown page advances to page 2. Empty results preserve requested/applied caps, `shown: 0`, `truncated: false`, criteria and a notice, with no continuation.
 
 ```ts
 tool('gutenberg_browse_popular', {
-  description: 'Browse up to 32 Gutenberg books ordered by downloads in the last 30 days at the source snapshot, optionally filtered by language or topic. Returns IDs, titles, authors, languages, counts, and readability flags.',
+  description: 'Browse up to 32 Gutenberg books ordered by downloads in the last 30 days at the source snapshot, optionally filtered by language, topic, MIME prefix or copyright status. Returns IDs, titles, authors, languages, counts, and readability flags.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
+    mime_type: z.string().optional().describe('Literal format MIME prefix; blank means unset.'),
+    copyright: z.array(z.enum(['true', 'false', 'null'])).optional().describe('Any selected copyright status: false means public domain in the USA, null means unknown; empty means all.'),
     languages: z.array(z.string().min(2).max(2)).optional()
       .describe('Restrict to books in these languages (two-character ISO 639-1 codes). Example: ["en"] for English only, ["de", "fr"] for German or French. Omit for all languages.'),
     topic: z.string().optional()
@@ -475,8 +480,8 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Positive requested limits with local output caps** | Text stays bounded at 50,000 characters and browse at 32 books without adding upstream work. Requested/applied limits are explicit; actual remaining text or catalog matches determine truncation. |
 | **`ids` as comma-separated query string value** | The Gutendex API accepts ids as a single comma-separated value (`ids=84,1342`), not as repeated URL parameters (`ids=84&ids=1342` only returns the last value). Other filters still apply when ids is set — a conflicting language filter reduces results. The Zod input is `z.array(z.number())` and the service layer joins with commas. |
 | **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
-| **No `mime_type` filter parameter exposed** | `is_readable` expresses reader support directly, while `has_plain_text` preserves narrow format availability. |
-| **`copyright` filter not exposed** | All Gutenberg books are public domain or public-domain-in-USA (copyright: false). The `true` and `null` buckets are edge cases not relevant to the server's stated purpose. Exposing the filter would add noise for no agent benefit. |
+| **MIME-prefix discovery filter** | Format-key prefixes select a corpus before counts and pagination; readability flags still describe each returned edition's reader support. |
+| **Tri-state copyright discovery filter** | Corpus selection preserves copyrighted, public-domain-in-USA and unknown source classifications independently, without implying worldwide legal clearance. |
 | **`summary` as nullable, with the full `summaries` array alongside** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. `summary` stays a nullable string — the first element if present — so the common single-summary read needs no array handling; `summaries` carries the complete set for the records that hold more than one, which reducing to the first element silently dropped. `content[]` lists only the entries beyond `summary` rather than repeating a multi-hundred-character paragraph. |
 | **`content[]` states absent fields rather than omitting them** | `structuredContent` carries `[]` and `null` verbatim, so a formatter that drops the line leaves a `content[]`-only client unable to distinguish a known-empty field from one the server never reported. Every collection and nullable in `gutenberg_get_book`, and the per-book subject list in `gutenberg_search_books`, therefore render unconditionally. Sentinel-based `format-parity` linting exercises one populated value per leaf and cannot catch value-dependent omission, so the empty states are covered by tests instead. |
 | **Refuse audio books explicitly** | Audio books have `media_type: "Sound"` and no literary text. Returning a readme file or an error without a clear message would confuse agents. The `audio_book` error contract gives a specific reason and recovery path. |
