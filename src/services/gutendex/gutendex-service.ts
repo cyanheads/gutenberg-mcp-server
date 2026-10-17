@@ -13,6 +13,7 @@ import {
   McpError,
   notFound,
   serviceUnavailable,
+  validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -23,6 +24,7 @@ import {
   type Book,
   hasPlainText,
   isReadable,
+  normalizeSearchParams,
   type RawBook,
   type RawBooksPage,
   type RawPerson,
@@ -57,20 +59,8 @@ function isInvalidPageResponse(data: unknown): boolean {
 }
 
 /**
- * Per-attempt ceiling for one catalog request. Gutendex answers a warm query in
- * tens of milliseconds and a cold one not at all until its own ~15 s gateway
- * boundary, with nothing observed in between; what clears a cold query is the
- * next attempt finding the cache filled, not the current one waiting longer. So
- * this sits far above the warm band and well below the boundary, spending the
- * ladder budget on more attempts rather than on one long wait.
- */
-const CATALOG_TIMEOUT_MS = 5_000;
-/**
- * Wall-clock ceiling for a whole catalog ladder, aborting any request still in
- * flight. Leaves room for three attempts, the last with over a second of runway —
- * several times the slowest warm answer. Sized so a catalog hop plus a text hop
- * still finishes inside the 60 s default MCP client request timeout, which is what
- * keeps `gutenberg_get_text` returning a usable error rather than nothing at all.
+ * Whole catalog ladder budget. Each attempt can use all remaining time, so a
+ * slow successful response is not restarted. Catalog plus text stays below 50s.
  */
 const CATALOG_BUDGET_MS = 15_000;
 /** Contract reason the catalog-backed tools declare for an unreachable Gutendex. */
@@ -128,6 +118,8 @@ export class GutendexService {
     if (params.query) url.searchParams.set('search', params.query);
     if (params.topic) url.searchParams.set('topic', params.topic);
     if (params.languages?.length) url.searchParams.set('languages', params.languages.join(','));
+    if (params.mime_type) url.searchParams.set('mime_type', params.mime_type);
+    if (params.copyright?.length) url.searchParams.set('copyright', params.copyright.join(','));
     if (params.author_year_start != null)
       url.searchParams.set('author_year_start', String(params.author_year_start));
     if (params.author_year_end != null)
@@ -164,7 +156,7 @@ export class GutendexService {
       },
       (signal) =>
         withRetry(
-          async () => {
+          async ({ signal: attemptSignal, remainingMs }) => {
             const reqCtx = requestContextService.createRequestContext({
               parentContext: ctx,
               operation: 'GutendexService.fetchPage',
@@ -174,8 +166,8 @@ export class GutendexService {
             // {"detail":"Invalid page."} when the requested page is past the last
             // page for a query; translate only that shape to a distinct domain
             // reason the tool can surface with recovery, and let other 404s bubble.
-            const response = await fetchWithTimeout(url, CATALOG_TIMEOUT_MS, reqCtx, {
-              signal,
+            const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
+              signal: attemptSignal,
               headers: { Accept: 'application/json' },
               expectedStatuses: [404],
             }).catch((err: unknown) => {
@@ -201,6 +193,7 @@ export class GutendexService {
           {
             operation: 'GutendexService.fetchPage',
             baseDelayMs: 1000,
+            deadlineMs: CATALOG_BUDGET_MS,
             signal,
           },
         ),
@@ -215,6 +208,32 @@ export class GutendexService {
     params: SearchParams,
     ctx: Context,
   ): Promise<{ books: Book[]; totalCount: number; hasMore: boolean; page: number }> {
+    ctx.signal.throwIfAborted();
+    params = normalizeSearchParams(params);
+    const pageNumber = params.page ?? 1;
+    if (params.ids?.length === 0)
+      return { books: [], totalCount: 0, hasMore: false, page: pageNumber };
+    const mirrored = await this.mirrorSearch(params, ctx);
+    ctx.signal.throwIfAborted();
+    if (mirrored !== null) {
+      if (pageNumber > 1 && (pageNumber - 1) * 32 >= mirrored.total) {
+        throw notFound('The requested page is beyond the available result range.', {
+          reason: 'page_out_of_range',
+        });
+      }
+      return {
+        books: mirrored.books,
+        totalCount: mirrored.total,
+        hasMore: pageNumber * 32 < mirrored.total,
+        page: pageNumber,
+      };
+    }
+    if ((params.query?.split(' ').length ?? 0) > 4) {
+      throw validationError('More than four query words require the local catalog mirror.', {
+        reason: 'query_requires_mirror',
+        ...ctx.recoveryFor('query_requires_mirror'),
+      });
+    }
     const page = await this.fetchPage(params, ctx);
     const books = page.results.map(normalizeBook);
     return {
@@ -223,6 +242,20 @@ export class GutendexService {
       hasMore: page.next !== null,
       page: params.page ?? 1,
     };
+  }
+
+  /** A valid empty answer is distinct from an unavailable mirror. */
+  private async mirrorSearch(params: SearchParams, ctx: Context) {
+    try {
+      const mirror = getCatalogMirrorService();
+      if (!(await mirror.ready())) return null;
+      ctx.signal.throwIfAborted();
+      return await mirror.searchBooks(params);
+    } catch (err: unknown) {
+      if (ctx.signal.aborted) throw err;
+      ctx.log.debug('Catalog mirror unavailable; falling back to the live catalog');
+      return null;
+    }
   }
 
   /**
@@ -283,15 +316,15 @@ export class GutendexService {
       },
       (signal) =>
         withRetry(
-          async () => {
+          async ({ signal: attemptSignal, remainingMs }) => {
             const reqCtx = requestContextService.createRequestContext({
               parentContext: ctx,
               operation: 'GutendexService.getBook',
             });
             // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
             // transient set, so withRetry won't retry it.
-            const response = await fetchWithTimeout(url, CATALOG_TIMEOUT_MS, reqCtx, {
-              signal,
+            const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
+              signal: attemptSignal,
               headers: { Accept: 'application/json' },
               expectedStatuses: [404],
             }).catch((err: unknown) => {
@@ -309,6 +342,7 @@ export class GutendexService {
           {
             operation: 'GutendexService.getBook',
             baseDelayMs: 1000,
+            deadlineMs: CATALOG_BUDGET_MS,
             signal,
           },
         ),

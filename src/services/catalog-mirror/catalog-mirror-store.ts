@@ -12,16 +12,14 @@
  */
 
 import type { MirrorRow, SqliteMirrorStoreSpec } from '@cyanheads/mcp-ts-core/mirror';
-import { type Book, isReadable, type Person } from '@/services/gutendex/types.js';
+import { type Book, foldSearchText, isReadable, type Person } from '@/services/gutendex/types.js';
 
 /** Primary table holding one row per Gutenberg book. */
 export const CATALOG_TABLE = 'books';
 
 /**
- * Columns the FTS5 index covers. `gutenberg_search_books` matches its `query` against
- * title and author name and its `topic` against subject and bookshelf, mirroring
- * Gutendex's own filters; `languages_text` joins them so a language filter is served
- * by the same index instead of a table scan.
+ * Columns retained for generic FTS queries. Discovery uses the separate Unicode-
+ * folded columns to preserve literal substring semantics rather than FTS tokens.
  */
 export const CATALOG_FTS_COLUMNS = [
   'title',
@@ -42,10 +40,12 @@ export interface CatalogBookRow extends MirrorRow {
   author_death_min: number | null;
   /** JSON `Person[]`. */
   authors: string;
+  authors_folded: string;
   /** Flattened author names, for FTS. */
   authors_text: string;
   /** JSON `string[]`. */
   bookshelves: string;
+  bookshelves_folded: string;
   bookshelves_text: string;
   /** 1 = copyrighted, 0 = public domain, null = unknown. */
   copyright: number | null;
@@ -65,10 +65,12 @@ export interface CatalogBookRow extends MirrorRow {
   source_notes?: string | null;
   /** JSON `string[]`. */
   subjects: string;
+  subjects_folded: string;
   subjects_text: string;
   /** JSON `string[]`. */
   summaries: string;
   title: string;
+  title_folded: string;
 }
 
 /**
@@ -84,7 +86,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: CATALOG_TABLE,
     primaryKey: 'id',
-    version: 2,
+    version: 3,
     migrations: [
       {
         version: 2,
@@ -94,10 +96,68 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
             db.exec('ALTER TABLE books ADD COLUMN source_notes TEXT');
         },
       },
+      {
+        version: 3,
+        up(db) {
+          /**
+           * Folded-only writes do not change FTS content. Suspend its UPDATE
+           * trigger inside the migration transaction to avoid rebuilding every
+           * indexed record; rollback restores the trigger if backfill fails.
+           */
+          const { sql: updateTrigger } = db
+            .prepare<{ sql: string }>(
+              "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='books_au'",
+            )
+            .get() as { sql: string };
+          db.exec('DROP TRIGGER books_au');
+          const columns = db.prepare<{ name: string }>('PRAGMA table_info(books)').all();
+          for (const name of [
+            'title_folded',
+            'authors_folded',
+            'subjects_folded',
+            'bookshelves_folded',
+          ]) {
+            if (!columns.some((column) => column.name === name))
+              db.exec(`ALTER TABLE books ADD COLUMN ${name} TEXT`);
+          }
+          const read = db.prepare<CatalogBookRow>(
+            'SELECT id, title, authors, subjects, bookshelves FROM books WHERE id > ? ORDER BY id LIMIT 500',
+          );
+          const write = db.prepare(
+            'UPDATE books SET title_folded=?, authors_folded=?, subjects_folded=?, bookshelves_folded=? WHERE id=?',
+          );
+          let after = 0;
+          for (;;) {
+            const rows = read.all(after);
+            if (rows.length === 0) break;
+            for (const row of rows) {
+              const folded = foldedFields(
+                row.title,
+                JSON.parse(row.authors) as Person[],
+                JSON.parse(row.subjects) as string[],
+                JSON.parse(row.bookshelves) as string[],
+              );
+              write.run(
+                folded.title_folded,
+                folded.authors_folded,
+                folded.subjects_folded,
+                folded.bookshelves_folded,
+                row.id,
+              );
+              after = row.id;
+            }
+          }
+          db.exec(updateTrigger);
+        },
+      },
     ],
     columns: {
       id: 'INTEGER',
       title: 'TEXT NOT NULL',
+      title_folded: 'TEXT',
+      authors_folded: 'TEXT',
+      subjects_folded: 'TEXT',
+      bookshelves_folded: 'TEXT',
       authors: 'TEXT NOT NULL',
       translators: 'TEXT NOT NULL',
       editors: 'TEXT NOT NULL',
@@ -125,6 +185,16 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
   };
 }
 
+/** Unicode case conversion is done at ingest, since SQLite LOWER only folds ASCII. */
+function foldedFields(title: string, authors: Person[], subjects: string[], bookshelves: string[]) {
+  return {
+    title_folded: foldSearchText(title),
+    authors_folded: JSON.stringify(authors.map((person) => foldSearchText(person.name))),
+    subjects_folded: JSON.stringify(subjects.map(foldSearchText)),
+    bookshelves_folded: JSON.stringify(bookshelves.map(foldSearchText)),
+  };
+}
+
 /** Smallest and largest known value of one lifespan field across a book's authors. */
 function lifespanRange(
   authors: Person[],
@@ -142,6 +212,7 @@ export function rowFromBook(book: Book): CatalogBookRow {
   const birth = lifespanRange(book.authors, 'birth_year');
   const death = lifespanRange(book.authors, 'death_year');
   return {
+    ...foldedFields(book.title, book.authors, book.subjects, book.bookshelves),
     id: book.id,
     title: book.title,
     authors: JSON.stringify(book.authors),

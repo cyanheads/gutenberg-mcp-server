@@ -150,10 +150,9 @@ COPY --from=build /usr/src/app/scripts/catalog-mirror-init.ts \
                   /usr/src/app/scripts/_mirror-context.ts \
                   ./scripts/
 
-# Bun honors tsconfig `paths` at runtime. The source tsconfig maps `@/*` to `./src/*`,
-# which never reaches this image; this one maps it to the compiled `./dist/*`, so the
-# same `bun run mirror:*` command works in a dev checkout and in the container.
-RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
+# Lifecycle commands explicitly select the runtime aliases, resolving source in a
+# checkout and compiled modules in npm packages and this image.
+COPY tsconfig.runtime.json ./
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.

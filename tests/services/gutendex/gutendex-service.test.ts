@@ -17,6 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
+import { GutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
 import { GutendexService } from '@/services/gutendex/gutendex-service.js';
 import type { RawBook } from '@/services/gutendex/types.js';
 import { hasPlainText } from '@/services/gutendex/types.js';
@@ -183,6 +184,86 @@ describe('GutendexService — catalog ladder', () => {
     expect(http.calls).toHaveLength(1);
   });
 
+  it('characterizes literal punctuation and four search words on the live URL', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+    });
+    await makeService().searchBooks(
+      { query: 'austen pride % _', ids: [1342], sort: 'ascending' },
+      createMockContext(),
+    );
+    const url = new URL(http.calls[0]!.request.url);
+    expect(url.searchParams.get('search')).toBe('austen pride % _');
+    expect(url.searchParams.get('ids')).toBe('1342');
+    expect(url.searchParams.get('sort')).toBe('ascending');
+  });
+
+  it('returns an explicit empty selection without catalog I/O', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+    });
+    const result = await makeService().searchBooks(
+      { ids: [], query: 'one two three four five', page: 99 },
+      createMockContext(),
+    );
+    expect(result).toEqual({ books: [], totalCount: 0, hasMore: false, page: 99 });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('rejects more than four live query words before catalog I/O', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+    });
+    await expect(
+      makeService().searchBooks({ query: 'dickens a tale of two' }, createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'query_requires_mirror' } });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it.each(['page', 'book'])(
+    'allows a six-second %s response to finish in one attempt',
+    async (kind) => {
+      vi.useFakeTimers();
+      http.route({
+        match: ANY_CATALOG_URL,
+        respond: (request) =>
+          new Promise((resolve, reject) => {
+            const timer = setTimeout(
+              () =>
+                resolve(
+                  Response.json(
+                    kind === 'book'
+                      ? rawBook
+                      : { count: 1, next: null, previous: null, results: [rawBook] },
+                  ),
+                ),
+              6000,
+            );
+            request.signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                reject(request.signal.reason);
+              },
+              { once: true },
+            );
+          }),
+      });
+      const service = makeService();
+      const pending = (
+        kind === 'book'
+          ? service.getBook(1342, createMockContext())
+          : service.searchBooks({}, createMockContext())
+      ).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(await pending).toMatchObject(kind === 'book' ? { id: 1342 } : { totalCount: 1 });
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
   it('keeps a page-beyond-range 404 as page_out_of_range and does not retry it', async () => {
     http.route({
       match: ANY_CATALOG_URL,
@@ -214,6 +295,45 @@ describe('GutendexService — catalog ladder', () => {
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data).toMatchObject({ reason: 'not_found' });
     expect(http.calls).toHaveLength(1);
+  });
+
+  it('does not relabel a non-page catalog 404 as an exhausted page or outage', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ detail: 'Not found.' }, { status: 404 }),
+    });
+    const error = await makeService()
+      .searchBooks({ page: 99 }, createMockContext())
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    expect((error as McpError).data).not.toMatchObject({ reason: 'page_out_of_range' });
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('lets a retry consume the remaining budget after a fast transient failure', async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => {
+        attempt += 1;
+        return attempt === 1
+          ? new Response('busy', { status: 503 })
+          : new Promise((resolve) =>
+              setTimeout(
+                () =>
+                  resolve(
+                    Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+                  ),
+                6000,
+              ),
+            );
+      },
+    });
+    const pending = makeService().searchBooks({}, createMockContext());
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(await pending).toMatchObject({ totalCount: 1 });
+    expect(http.calls).toHaveLength(2);
   });
 
   it('reports an exhausted ladder as catalog_unavailable with recovery, leaking no URL', async () => {
@@ -273,9 +393,8 @@ describe('GutendexService — catalog ladder', () => {
     // exhaustion enrichment — neither marker is present.
     expect(err.data).not.toHaveProperty('retryAttempts');
     expect(err.message).not.toContain('failed after');
-    // Three attempts fit inside the budget; a single long per-attempt wait
-    // would have allowed fewer.
-    expect(http.calls).toHaveLength(3);
+    // A still-running attempt consumes the budget rather than being restarted.
+    expect(http.calls).toHaveLength(1);
   });
 
   it('propagates a caller cancel landing mid-fetch instead of reporting an outage', async () => {
@@ -301,6 +420,38 @@ describe('GutendexService — catalog ladder', () => {
     expect(err.data).not.toHaveProperty('reason');
     expect(err.code).not.toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(http.calls).toHaveLength(1);
+  });
+
+  it('settles a slow catalog hop plus stalled text hop below the client timeout', async () => {
+    vi.useFakeTimers();
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () =>
+        new Promise((resolve) => setTimeout(() => resolve(Response.json(rawBook)), 14000)),
+    });
+    http.route({ match: /^https:\/\/mirror\.test\/cache\//, respond: stallingResponder });
+    const ctx = createMockContext();
+    const text = new GutenbergTextService({} as AppConfig, createInMemoryStorage(), {
+      gutendexBaseUrl: CATALOG_BASE,
+      gutenbergTextBaseUrl: 'https://mirror.test',
+      mirrorPath: ':memory:',
+    });
+    const pending = makeService()
+      .getBook(1342, ctx)
+      .then((book) => text.fetchAndCacheText(book, 1342, ctx))
+      .catch((error: unknown) => error);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(48900);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await pending).toMatchObject({ data: { reason: 'text_fetch_failed' } });
+    expect(settled).toBe(true);
+    expect(
+      http.calls.filter((call) => new URL(call.request.url).origin === CATALOG_HOST),
+    ).toHaveLength(1);
   });
 
   it('propagates a caller cancel landing mid-backoff, reason string and all', async () => {

@@ -29,6 +29,118 @@ function parse(id: number): Book {
 }
 
 describe('catalogStoreSpec', () => {
+  it('backfills Unicode search columns across multiple legacy batches without a harvest', async () => {
+    const dir = mkdtempSync(
+      join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-discovery-migration-'),
+    );
+    const path = join(dir, 'legacy.sqlite');
+    const spec = catalogStoreSpec(path);
+    const folded = ['title_folded', 'authors_folded', 'subjects_folded', 'bookshelves_folded'];
+    for (const column of folded) delete spec.columns[column];
+    const old = sqliteMirrorStore({ ...spec, version: 2, migrations: [] });
+    try {
+      const row = {
+        ...rowFromBook({
+          ...parse(84),
+          title: 'ÉLÉPHANT % _',
+          authors: [{ name: 'ÅNGSTRÖM', birth_year: null, death_year: 1900 }],
+          subjects: ['ÉTUDES'],
+          bookshelves: ['Über Bücher'],
+        }),
+      };
+      for (const column of folded) delete row[column];
+      await old.applyBatch(
+        Array.from({ length: 1001 }, (_, i) => ({ ...row, id: i + 1 })),
+        [],
+      );
+      await old.writeState({
+        status: 'complete',
+        completedAt: '2026-10-01T00:00:00.000Z',
+        total: 1001,
+      });
+    } finally {
+      await old.close();
+    }
+    const upgraded = sqliteMirrorStore(catalogStoreSpec(path));
+    try {
+      const db = await upgraded.raw();
+      const rows = db
+        .prepare<{
+          id: number;
+          title_folded: string;
+          authors_folded: string;
+          subjects_folded: string;
+          bookshelves_folded: string;
+        }>(
+          'SELECT id,title_folded,authors_folded,subjects_folded,bookshelves_folded FROM books ORDER BY id',
+        )
+        .all();
+      expect(rows).toHaveLength(1001);
+      for (const row of rows)
+        expect(row).toMatchObject({
+          title_folded: 'éléphant % _',
+          authors_folded: '["ångström"]',
+          subjects_folded: '["études"]',
+          bookshelves_folded: '["über bücher"]',
+        });
+      expect((await upgraded.readState()).completedAt).toBe('2026-10-01T00:00:00.000Z');
+      expect((await upgraded.integrityCheck()).ok).toBe(true);
+      expect((await upgraded.query({ match: 'ÉLÉPHANT', limit: 1, offset: 0 })).total).toBe(1001);
+      await upgraded.applyBatch(
+        [
+          rowFromBook({
+            ...parse(84),
+            id: 1001,
+            title: 'Renamed Ωμέγα',
+            authors: [{ name: 'Newauthor', birth_year: null, death_year: null }],
+          }),
+        ],
+        [],
+      );
+      expect((await upgraded.query({ match: 'ÉLÉPHANT', limit: 1, offset: 0 })).total).toBe(1000);
+      expect((await upgraded.query({ match: 'Ωμέγα', limit: 1, offset: 0 })).total).toBe(1);
+      expect((await upgraded.query({ match: 'Newauthor', limit: 1, offset: 0 })).total).toBe(1);
+    } finally {
+      await upgraded.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rolls back derived columns and restores FTS triggers when a backfill fails', async () => {
+    const dir = mkdtempSync(
+      join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-discovery-rollback-'),
+    );
+    const path = join(dir, 'legacy.sqlite');
+    const spec = catalogStoreSpec(path);
+    const folded = ['title_folded', 'authors_folded', 'subjects_folded', 'bookshelves_folded'];
+    for (const column of folded) delete spec.columns[column];
+    const row = { ...rowFromBook(parse(84)) };
+    for (const column of folded) delete row[column];
+    const old = sqliteMirrorStore({ ...spec, version: 2, migrations: [] });
+    await old.applyBatch([{ ...row, authors: 'not-json' }], []);
+    await old.close();
+    const failing = sqliteMirrorStore(catalogStoreSpec(path));
+    await expect(failing.raw()).rejects.toThrow();
+    await failing.close();
+    const recovered = sqliteMirrorStore({ ...spec, version: 2, migrations: [] });
+    try {
+      const db = await recovered.raw();
+      expect(
+        db
+          .prepare<{ name: string }>('PRAGMA table_info(books)')
+          .all()
+          .map((column) => column.name),
+      ).not.toContain('title_folded');
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name='books_au'").all(),
+      ).toHaveLength(1);
+      await recovered.applyBatch([{ ...row, title: 'Recovered updated title' }], []);
+      expect((await recovered.query({ match: 'Recovered', limit: 1, offset: 0 })).total).toBe(1);
+    } finally {
+      await recovered.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('migrates an existing database without a harvest and safely creates fresh databases', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gutenberg-notes-migration-'));
     try {

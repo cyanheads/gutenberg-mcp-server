@@ -18,13 +18,19 @@ import {
   type MirrorRunOptions,
   type MirrorStatus,
   type QueryOptions,
+  type SqlValue,
   type SyncContext,
   type SyncPage,
   sqliteMirrorStore,
 } from '@cyanheads/mcp-ts-core/mirror';
 import { schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { Book } from '@/services/gutendex/types.js';
+import {
+  type Book,
+  foldSearchText,
+  normalizeSearchParams,
+  type SearchParams,
+} from '@/services/gutendex/types.js';
 import {
   bookFromRow,
   CATALOG_TABLE,
@@ -170,6 +176,77 @@ export class CatalogMirrorService {
   async queryBooks(options: QueryOptions): Promise<CatalogQueryResult> {
     const { rows, total } = await this.mirror.query(options);
     return { books: rows.map(bookFromRow), total };
+  }
+
+  /** Complete discovery: identical predicates drive totals and the selected page. */
+  async searchBooks(input: SearchParams): Promise<CatalogQueryResult> {
+    const params = normalizeSearchParams(input);
+    if (params.ids?.length === 0) return { books: [], total: 0 };
+    const predicates: string[] = [];
+    const values: SqlValue[] = [];
+    if (params.query) {
+      predicates.push(
+        'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE instr(title_folded, term.value) = 0 AND NOT EXISTS (SELECT 1 FROM json_each(authors_folded) AS author WHERE instr(author.value, term.value) > 0))',
+      );
+      values.push(JSON.stringify([...new Set(foldSearchText(params.query).split(' '))]));
+    }
+    if (params.topic) {
+      predicates.push(
+        '(EXISTS (SELECT 1 FROM json_each(subjects_folded) WHERE instr(value, ?) > 0) OR EXISTS (SELECT 1 FROM json_each(bookshelves_folded) WHERE instr(value, ?) > 0))',
+      );
+      values.push(foldSearchText(params.topic), foldSearchText(params.topic));
+    }
+    if (params.languages?.length) {
+      predicates.push(
+        'EXISTS (SELECT 1 FROM json_each(languages) WHERE value IN (SELECT value FROM json_each(?)))',
+      );
+      values.push(JSON.stringify(params.languages));
+    }
+    if (params.ids) {
+      predicates.push('id IN (SELECT value FROM json_each(?))');
+      values.push(JSON.stringify(params.ids));
+    }
+    if (params.author_year_start !== undefined) {
+      predicates.push('(author_birth_max >= ? OR author_death_max >= ?)');
+      values.push(params.author_year_start, params.author_year_start);
+    }
+    if (params.author_year_end !== undefined) {
+      predicates.push('(author_birth_min <= ? OR author_death_min <= ?)');
+      values.push(params.author_year_end, params.author_year_end);
+    }
+    if (params.mime_type) {
+      predicates.push(
+        'EXISTS (SELECT 1 FROM json_each(formats) WHERE substr(key, 1, length(?)) = ?)',
+      );
+      values.push(params.mime_type, params.mime_type);
+    }
+    if (params.copyright?.length) {
+      predicates.push(
+        'EXISTS (SELECT 1 FROM json_each(?) AS status WHERE copyright IS status.value)',
+      );
+      values.push(
+        JSON.stringify(
+          params.copyright.map((status) => (status === 'null' ? null : Number(status === 'true'))),
+        ),
+      );
+    }
+    const where = predicates.length ? ` WHERE ${predicates.join(' AND ')}` : '';
+    const order =
+      params.sort === 'ascending'
+        ? 'id ASC'
+        : params.sort === 'descending'
+          ? 'id DESC'
+          : 'download_count DESC, id ASC';
+    const db = await this.mirror.raw();
+    return db.transaction(() => {
+      const { total } = db
+        .prepare<{ total: number }>(`SELECT COUNT(*) AS total FROM books${where}`)
+        .get(...values) as { total: number };
+      const rows = db
+        .prepare<CatalogBookRow>(`SELECT * FROM books${where} ORDER BY ${order} LIMIT 32 OFFSET ?`)
+        .all(...values, ((params.page ?? 1) - 1) * 32);
+      return { books: rows.map(bookFromRow), total };
+    });
   }
 
   /**

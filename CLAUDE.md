@@ -68,14 +68,12 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
     totalCount: z.number().describe('Total books matching the query.'),
     hasMore: z.boolean().describe('True if more pages are available.'),
   }),
-  errors: [
-    { reason: 'no_results', code: JsonRpcErrorCode.NotFound,
-      when: 'No books matched the query.',
-      recovery: 'Broaden the search — try fewer words, remove language filters, or check the topic spelling.' },
-  ],
+  enrichment: {
+    notice: z.string().optional().describe('Guidance for an empty search.'),
+  },
   async handler(input, ctx) {
     const result = await getGutendexService().searchBooks(input, ctx);
-    if (result.books.length === 0) throw ctx.fail('no_results', 'No books matched.');
+    if (result.books.length === 0) ctx.enrich.notice('No books matched. Try fewer words or remove a filter.');
     return result;
   },
   format: (result) => [{
@@ -247,6 +245,8 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 ---
 
 ## Structure
+
+Discovery uses the ready RDF mirror with Unicode substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with a notice and normalized typed criteria. MIME-prefix and tri-state copyright filters apply on both sources; browse continuation preserves them and repeats page 1 if its cap cuts the first page. Mirror schema v3 backfills Unicode-folded columns from existing rows in bounded batches without reharvesting. Live attempts consume the remaining 15-second catalog budget rather than restarting after five seconds.
 
 ```text
 src/

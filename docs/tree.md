@@ -1,6 +1,6 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 20:36:20
+Generated on: 2026-10-17 22:27:05
 
 ```text
 gutenberg-mcp-server/
@@ -147,11 +147,12 @@ gutenberg-mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── gutenberg-browse-popular.tool.ts
-│   │           ├── gutenberg-get-book.tool.ts
-│   │           ├── gutenberg-get-text.tool.ts
-│   │           └── gutenberg-search-books.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── gutenberg-browse-popular.tool.ts
+│   │       │   ├── gutenberg-get-book.tool.ts
+│   │       │   ├── gutenberg-get-text.tool.ts
+│   │       │   └── gutenberg-search-books.tool.ts
+│   │       └── discovery-criteria.ts
 │   ├── services/
 │   │   ├── catalog-mirror/
 │   │   │   ├── catalog-mirror-service.ts
@@ -198,7 +199,9 @@ gutenberg-mcp-server/
 │   │   │   └── gutenberg-text-service.test.ts
 │   │   ├── gutendex/
 │   │   │   ├── gutendex-mirror-read-path.test.ts
-│   │   │   └── gutendex-service.test.ts
+│   │   │   ├── gutendex-service.test.ts
+│   │   │   └── search-normalization.test.ts
+│   │   ├── catalog-discovery.test.ts
 │   │   └── upstream-deadline.test.ts
 │   └── tools/
 │       ├── gutenberg-browse-popular.tool.test.ts
@@ -226,6 +229,7 @@ gutenberg-mcp-server/
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
+├── tsconfig.runtime.json
 ├── tsconfig.scripts-check.json
 └── vitest.config.ts
 ```

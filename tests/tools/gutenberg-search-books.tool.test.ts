@@ -42,6 +42,40 @@ beforeEach(() => {
 });
 
 describe('gutenbergSearchBooks', () => {
+  it('echoes normalized filters and returns empty success on both surfaces', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [],
+      totalCount: 0,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergSearchBooks, {
+      query: '  austen   ',
+      topic: ' ',
+      languages: [],
+      ids: [],
+      mime_type: 'text/plain',
+      copyright: ['null'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      books: [],
+      totalCount: 0,
+      effectiveCriteria: {
+        query: 'austen',
+        sort: 'popular',
+        page: 1,
+        ids: [],
+        mime_type: 'text/plain',
+        copyright: ['null'],
+      },
+      notice: expect.any(String),
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('austen');
+    expect(text).toContain('empty ID selection');
+    expect(mockGutendexService.searchBooks).not.toHaveBeenCalled();
+  });
   it('carries HTML readability and the snapshot popularity window on both surfaces', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [{ ...mockBook, is_readable: true, has_plain_text: false }],
@@ -131,7 +165,7 @@ describe('gutenbergSearchBooks', () => {
     );
   });
 
-  it('throws ctx.fail("no_results") when service returns empty books', async () => {
+  it('returns an empty collection when service returns empty books', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [],
       totalCount: 0,
@@ -141,9 +175,10 @@ describe('gutenbergSearchBooks', () => {
     const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
     const input = gutenbergSearchBooks.input.parse({ query: 'zzznomatch' });
 
-    await expect(gutenbergSearchBooks.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
+    await expect(gutenbergSearchBooks.handler(input, ctx)).resolves.toMatchObject({
+      books: [],
+      totalCount: 0,
+      hasMore: false,
     });
   });
 
@@ -409,50 +444,6 @@ describe('gutenbergSearchBooks — subject-free results', () => {
     expect(result.isError).toBeFalsy();
     expect(structured.books[0]?.subjects).toEqual([]);
     expect(text).toContain('Subjects: None');
-  });
-});
-
-// ── Cache key storage-validity regression ────────────────────────────────────
-//
-// Regression for the bug where cache keys embedded raw Gutendex URLs
-// (e.g. "gutendex:page:https://gutendex.com/books/?search=Pride+and+Prejudice")
-// which the mcp-ts-core storage validator rejects — the VALID_KEY_PATTERN
-// only allows [a-zA-Z0-9_.\-/], forbidding ?, =, +, &, and colons.
-// The fix uses SHA-256(URL) as the page key prefix and slashes as separators.
-
-describe('cache key storage-validity', () => {
-  const VALID_KEY_PATTERN = /^[a-zA-Z0-9_.\-/]+$/;
-
-  it('page cache key: SHA-256 hash of URL produces a storage-valid key', async () => {
-    const { createHash } = await import('node:crypto');
-    const url = 'https://gutendex.com/books/?search=Pride+and+Prejudice&languages=en&page=2';
-    const hash = createHash('sha256').update(url).digest('hex');
-    const key = `gutendex/page/${hash}`;
-
-    // Must pass the framework key validator
-    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
-    // Must not contain any query-string or colon characters
-    expect(key).not.toMatch(/[?=+&:]/);
-  });
-
-  it('page cache key is stable for the same URL', async () => {
-    const { createHash } = await import('node:crypto');
-    const url = 'https://gutendex.com/books/?search=frankenstein';
-    const key1 = `gutendex/page/${createHash('sha256').update(url).digest('hex')}`;
-    const key2 = `gutendex/page/${createHash('sha256').update(url).digest('hex')}`;
-    expect(key1).toBe(key2);
-  });
-
-  it('book cache key uses slash separator (not colon)', () => {
-    const key = 'gutendex/book/1342';
-    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
-    expect(key).not.toContain(':');
-  });
-
-  it('text cache key uses slash separator (not colon)', () => {
-    const key = 'gutenberg/text/84';
-    expect(VALID_KEY_PATTERN.test(key)).toBe(true);
-    expect(key).not.toContain(':');
   });
 });
 

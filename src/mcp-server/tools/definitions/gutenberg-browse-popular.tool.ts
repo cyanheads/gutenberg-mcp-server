@@ -7,14 +7,18 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
+import { normalizeSearchParams } from '@/services/gutendex/types.js';
+import { discoveryCriteria, discoveryFilters } from '../discovery-criteria.js';
 
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   title: 'Browse Popular Gutenberg Books',
   description:
-    'Browse Project Gutenberg books ordered by downloads in the last 30 days at the source snapshot. Returns up to 32 titles with IDs, authors, languages, download counts, and is_readable. Optionally filter by language or topic. Use this for discovery — "what are the most popular classics in French?" — or to check that the catalog is reachable.',
+    'Browse Project Gutenberg books ordered by downloads in the last 30 days at the source snapshot. Returns up to 32 titles with IDs, authors, languages, download counts, and is_readable. Filter by language, topic, MIME prefix or copyright status. Empty matches succeed with criteria and a notice; truncated results include executable search continuation. Use this for discovery — "what are the most popular classics in French?".',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
+    mime_type: discoveryFilters.mime_type,
+    copyright: discoveryFilters.copyright,
     languages: z
       .array(z.string().min(2).max(2))
       .optional()
@@ -90,6 +94,21 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   }),
 
   enrichment: {
+    effectiveCriteria: discoveryCriteria.describe(
+      'Normalized browse criteria, including popular sort and first page.',
+    ),
+    notice: z.string().optional().describe('Guidance for empty or capped results.'),
+    continuation: z
+      .object({
+        tool: z
+          .literal('gutenberg_search_books')
+          .describe('Tool to call for the remaining matching books.'),
+        arguments: discoveryCriteria.describe(
+          'Executable search arguments preserving all filters. Page 1 may repeat already shown books when the browse cap cuts a page.',
+        ),
+      })
+      .optional()
+      .describe('Present only when more matching books exist.'),
     truncated: z.boolean().describe('True when the catalog held more matches than were returned.'),
     shown: z.number().describe('Number of books returned in this response.'),
     cap: z.number().describe('The limit that was applied.'),
@@ -101,12 +120,15 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       ),
   },
 
-  // Presentation for the enrichment block's content[] trailer. Without these,
-  // the four scalar fields render as a disconnected `**key:** value` dump and the
-  // retrieval pointer (routed through the undeclared `notice` field) is stripped
-  // before it reaches content[]. Per-field renders compose a readable disclosure
-  // that content[]-only clients (e.g. Claude Desktop) see alongside format().
+  /** Render criteria and executable continuation alongside the cap disclosure. */
   enrichmentTrailer: {
+    effectiveCriteria: { render: (value) => `Browse criteria: ${JSON.stringify(value)}` },
+    continuation: {
+      render: (value) =>
+        value
+          ? `Continue with ${value.tool} ${JSON.stringify(value.arguments)}. Page 1 repeats the first page when the browse cap leaves unseen books on it.`
+          : '',
+    },
     truncated: {
       // The framework renders a trailer line for every key present in the
       // enrichment store, so this fires on complete results too — branch on the
@@ -129,18 +151,11 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
           ? ''
           : `The least-popular book shown has ${value.toLocaleString()} downloads in the last 30 days (source snapshot); omitted books have at most this count. ` +
             'To page through the full result set, call gutenberg_search_books with the same language/topic ' +
-            'filters, sort="popular", and successive page values.',
+            'filters plus any MIME/copyright filters, sort="popular", starting at the continuation page above.',
     },
   },
 
   errors: [
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'No books match the language/topic filter combination.',
-      recovery:
-        'Try a broader topic phrase or remove the language filter. The catalog is large but topic matching is phrase-based — "detective fiction" may miss books shelved under "Mystery".',
-    },
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -153,29 +168,43 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   ],
 
   async handler(input, ctx) {
+    ctx.signal.throwIfAborted();
+    const criteria = normalizeSearchParams({
+      languages: input.languages,
+      topic: input.topic,
+      mime_type: input.mime_type,
+      copyright: input.copyright,
+      sort: 'popular',
+      page: 1,
+    });
+    ctx.enrich({ effectiveCriteria: discoveryCriteria.parse(criteria) });
     ctx.log.info('Browsing popular Gutenberg books', {
       languages: input.languages,
       topic: input.topic,
       limit: input.limit,
     });
 
-    const result = await getGutendexService().searchBooks(
-      {
-        sort: 'popular',
-        languages: input.languages?.length ? input.languages : undefined,
-        topic: input.topic,
-      },
-      ctx,
-    );
+    const result = await getGutendexService().searchBooks(criteria, ctx);
 
     if (result.books.length === 0) {
-      throw ctx.fail('no_results', 'No books matched the filter criteria.');
+      ctx.enrich.notice(
+        'No books matched these criteria. Try a broader topic or remove a language, format, or copyright filter.',
+      );
     }
 
     const appliedLimit = Math.min(input.limit, 32);
     const limited = result.books.slice(0, appliedLimit);
 
     if (result.totalCount > limited.length) {
+      ctx.enrich({
+        continuation: {
+          tool: 'gutenberg_search_books',
+          arguments: discoveryCriteria.parse({
+            ...criteria,
+            page: limited.length < result.books.length ? 1 : (result.page ?? 1) + 1,
+          }),
+        },
+      });
       const ceiling = limited.at(-1)?.download_count;
       ctx.enrich.truncated({
         shown: limited.length,

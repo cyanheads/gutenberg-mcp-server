@@ -41,6 +41,73 @@ beforeEach(() => {
 });
 
 describe('gutenbergBrowsePopular', () => {
+  it.each([20, 32])(
+    'preserves executable filters without skipping unseen books at limit %i',
+    async (limit) => {
+      mockGutendexService.searchBooks.mockResolvedValue({
+        books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
+        totalCount: 64,
+        hasMore: true,
+        page: 1,
+      });
+      const result = await runToolContract(gutenbergBrowsePopular, {
+        limit,
+        languages: ['EN'],
+        topic: ' fiction ',
+        mime_type: 'text/',
+        copyright: ['false', 'null'],
+      });
+      expect(result.structuredContent).toMatchObject({
+        effectiveCriteria: {
+          languages: ['en'],
+          topic: 'fiction',
+          mime_type: 'text/',
+          copyright: ['false', 'null'],
+          sort: 'popular',
+          page: 1,
+        },
+        continuation: {
+          tool: 'gutenberg_search_books',
+          arguments: {
+            languages: ['en'],
+            topic: 'fiction',
+            mime_type: 'text/',
+            copyright: ['false', 'null'],
+            sort: 'popular',
+            page: limit === 32 ? 2 : 1,
+          },
+        },
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('text/');
+      expect(text).toContain(`"page":${limit === 32 ? 2 : 1}`);
+    },
+  );
+
+  it('keeps empty browse successful with caps and a notice on both surfaces', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [],
+      totalCount: 0,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergBrowsePopular, { limit: 100 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      books: [],
+      totalInCatalog: 0,
+      requestedLimit: 100,
+      appliedLimit: 32,
+      shown: 0,
+      cap: 32,
+      truncated: false,
+      notice: expect.any(String),
+    });
+    expect(result.structuredContent).not.toHaveProperty('continuation');
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toContain(
+      'No books matched',
+    );
+  });
   it('renders readability and the snapshot window for counts and the omitted-result ceiling', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [{ ...makeBook(1), is_readable: true, has_plain_text: false }],
@@ -83,7 +150,7 @@ describe('gutenbergBrowsePopular', () => {
     expect(text).toContain('Applied limit: 32');
     expect(text).toContain('same language/topic');
     expect(mockGutendexService.searchBooks).toHaveBeenCalledExactlyOnceWith(
-      { sort: 'popular', languages: ['en'], topic: 'fiction' },
+      expect.objectContaining({ sort: 'popular', languages: ['en'], topic: 'fiction', page: 1 }),
       expect.anything(),
     );
   });
@@ -241,7 +308,7 @@ describe('gutenbergBrowsePopular', () => {
     );
   });
 
-  it('throws ctx.fail("no_results") when service returns empty books', async () => {
+  it('returns an empty collection when service returns empty books', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [],
       totalCount: 0,
@@ -252,9 +319,11 @@ describe('gutenbergBrowsePopular', () => {
     const ctx = createMockContext({ errors: gutenbergBrowsePopular.errors });
     const input = gutenbergBrowsePopular.input.parse({ topic: 'zzznomatch' });
 
-    await expect(gutenbergBrowsePopular.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
+    await expect(gutenbergBrowsePopular.handler(input, ctx)).resolves.toMatchObject({
+      books: [],
+      totalInCatalog: 0,
+      requestedLimit: 20,
+      appliedLimit: 20,
     });
   });
 

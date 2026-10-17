@@ -123,6 +123,32 @@ describe('CatalogMirrorService — queries', () => {
     expect(books[0]?.id).toBe(84);
   });
 
+  it('applies every substring term before counting and paging', async () => {
+    const result = await service.searchBooks({
+      query: 'shel franken stein modern prometheus',
+      page: 1,
+    });
+    expect(result.books.map((book) => book.id)).toEqual([84]);
+    expect(result.total).toBe(1);
+    expect((await service.searchBooks({ query: 'shel franken stein modern absent' })).total).toBe(
+      0,
+    );
+  });
+
+  it('filters exact language, topic, MIME, copyright and IDs together', async () => {
+    const result = await service.searchBooks({
+      ids: [84, 1399],
+      languages: ['EN'],
+      topic: 'gothic',
+      mime_type: 'text/plain',
+      copyright: ['false'],
+    });
+    expect(result.books.map((book) => book.id)).toEqual([84]);
+    expect(result.total).toBe(1);
+    expect((await service.searchBooks({ languages: ['e'] })).total).toBe(0);
+    expect((await service.searchBooks({ mime_type: 'missing' })).total).toBe(0);
+  });
+
   it('matches an author name through the full-text index', async () => {
     const { books } = await service.queryBooks({
       match: '{title authors_text} : tolstoy',

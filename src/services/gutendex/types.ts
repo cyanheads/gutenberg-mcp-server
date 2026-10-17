@@ -73,12 +73,36 @@ export interface Book {
 export interface SearchParams {
   author_year_end?: number | undefined;
   author_year_start?: number | undefined;
+  copyright?: ('true' | 'false' | 'null')[] | undefined;
   ids?: number[] | undefined;
   languages?: string[] | undefined;
+  mime_type?: string | undefined;
   page?: number | undefined;
   query?: string | undefined;
   sort?: 'popular' | 'ascending' | 'descending' | undefined;
   topic?: string | undefined;
+}
+
+/** Fold catalog text without letting Greek final sigma depend on substring boundaries. */
+export function foldSearchText(value: string): string {
+  return value.toLowerCase().replaceAll('ς', 'σ');
+}
+
+/** Normalize form blanks and query whitespace before either catalog source sees them. */
+export function normalizeSearchParams(params: SearchParams): SearchParams {
+  const query = params.query?.replaceAll('\0', '').split(/\s+/u).filter(Boolean).join(' ');
+  return {
+    ...params,
+    query: query || undefined,
+    topic: params.topic?.trim() || undefined,
+    languages: params.languages?.length
+      ? params.languages.map((code) => code.toLowerCase())
+      : undefined,
+    mime_type: params.mime_type?.trim() || undefined,
+    copyright: params.copyright?.length ? params.copyright : undefined,
+    sort: params.sort ?? 'popular',
+    page: params.page ?? 1,
+  };
 }
 
 /**

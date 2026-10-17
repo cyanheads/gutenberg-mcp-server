@@ -7,19 +7,23 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
+import { normalizeSearchParams } from '@/services/gutendex/types.js';
+import { discoveryCriteria, discoveryFilters } from '../discovery-criteria.js';
 
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   title: 'Search Gutenberg Books',
   description:
-    'Search the Project Gutenberg catalog of 78,000+ public-domain books. Matches title and author name with query words; filters by topic (subject or bookshelf keyword), language, author lifespan, or a specific list of Gutenberg IDs. Default popularity ordering uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
+    'Search the Project Gutenberg catalog of 78,000+ books. Every query word matches a title or author substring; filter by topic, language, author lifespan, IDs, MIME prefix or copyright status. More than four query words require the local mirror. Empty matches succeed with criteria and a notice. Default popularity uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
+    mime_type: discoveryFilters.mime_type,
+    copyright: discoveryFilters.copyright,
     query: z
       .string()
       .optional()
       .describe(
-        'Words to match against book titles and author names (case-insensitive, space-separated). Example: "dickens expectations" matches Great Expectations by Charles Dickens.',
+        'Every nonblank whitespace-separated word must match title or author name as a case-insensitive literal substring. More than four words require the local mirror; live fallback rejects longer queries. Example: "dickens expectations" matches Great Expectations.',
       ),
     topic: z
       .string()
@@ -57,7 +61,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       .array(z.number().int().positive())
       .optional()
       .describe(
-        'Narrow results to specific Gutenberg ID numbers. Other filters still apply. Useful for batch pre-fetching known IDs; use gutenberg_get_book for single-ID lookups.',
+        'Narrow results to these Gutenberg IDs, intersected with other filters. An empty list selects nothing; omit for unrestricted IDs. Use gutenberg_get_book for full single-ID metadata.',
       ),
     page: z
       .number()
@@ -123,13 +127,24 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
     hasMore: z.boolean().describe('True if there are additional pages of results.'),
   }),
 
+  enrichment: {
+    effectiveCriteria: discoveryCriteria.describe(
+      'Normalized search criteria, including sort and page defaults.',
+    ),
+    notice: z.string().optional().describe('Actionable guidance for an empty selection.'),
+  },
+  enrichmentTrailer: {
+    effectiveCriteria: { render: (value) => `Search criteria: ${JSON.stringify(value)}` },
+  },
+
   errors: [
     {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'The query matched no books in the catalog.',
+      reason: 'query_requires_mirror',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'More than four query words were supplied while the local mirror could not answer.',
       recovery:
-        'Broaden the search — try fewer or different query words, remove language filters, or check the topic spelling.',
+        'Shorten the query to at most four words, or ask the server operator to initialize or repair the local catalog mirror.',
+      thrownBy: 'service',
     },
     {
       reason: 'page_out_of_range',
@@ -150,6 +165,9 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   ],
 
   async handler(input, ctx) {
+    ctx.signal.throwIfAborted();
+    const criteria = normalizeSearchParams(input);
+    ctx.enrich({ effectiveCriteria: discoveryCriteria.parse(criteria) });
     ctx.log.info('Searching Gutenberg catalog', {
       query: input.query,
       topic: input.topic,
@@ -157,41 +175,34 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       page: input.page,
     });
 
-    const result = await getGutendexService()
-      .searchBooks(
-        {
-          query: input.query,
-          topic: input.topic,
-          languages: input.languages?.length ? input.languages : undefined,
-          author_year_start: input.author_year_start,
-          author_year_end: input.author_year_end,
-          sort: input.sort,
-          ids: input.ids?.length ? input.ids : undefined,
-          page: input.page,
-        },
-        ctx,
-      )
-      .catch((err: unknown) => {
-        // The service tags a page-beyond-range 404 with reason 'page_out_of_range';
-        // surface it as a tool-level failure with recovery instead of the raw
-        // upstream fetch error. Any other error bubbles unchanged.
-        if (
-          err instanceof McpError &&
-          typeof err.data === 'object' &&
-          err.data !== null &&
-          (err.data as { reason?: unknown }).reason === 'page_out_of_range'
-        ) {
-          throw ctx.fail(
-            'page_out_of_range',
-            `Page ${input.page} is beyond the available results for this search.`,
-            { ...ctx.recoveryFor('page_out_of_range') },
-          );
-        }
-        throw err;
-      });
+    const result = await (input.ids?.length === 0
+      ? Promise.resolve({ books: [], totalCount: 0, hasMore: false, page: input.page })
+      : getGutendexService().searchBooks(criteria, ctx)
+    ).catch((err: unknown) => {
+      // The service tags a page-beyond-range 404 with reason 'page_out_of_range';
+      // surface it as a tool-level failure with recovery instead of the raw
+      // upstream fetch error. Any other error bubbles unchanged.
+      if (
+        err instanceof McpError &&
+        typeof err.data === 'object' &&
+        err.data !== null &&
+        (err.data as { reason?: unknown }).reason === 'page_out_of_range'
+      ) {
+        throw ctx.fail(
+          'page_out_of_range',
+          `Page ${input.page} is beyond the available results for this search.`,
+          { ...ctx.recoveryFor('page_out_of_range') },
+        );
+      }
+      throw err;
+    });
 
     if (result.books.length === 0) {
-      throw ctx.fail('no_results', 'No books matched the search criteria.');
+      ctx.enrich.notice(
+        input.ids?.length === 0
+          ? 'The empty ID selection selects no books. Supply one or more IDs, or omit ids to search the catalog.'
+          : 'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+      );
     }
 
     return {

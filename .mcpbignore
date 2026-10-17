@@ -16,4 +16,5 @@
 /wrangler.toml
 /biome.json
 /tsconfig*.json
+!/tsconfig.runtime.json
 /vitest.config.ts
