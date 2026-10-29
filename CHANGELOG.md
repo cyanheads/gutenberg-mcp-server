@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-29
+
+Publish the gutenberg-guide agent skill over MCP and in every distribution, on mcp-ts-core 0.13.18.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-17 · ⚠️ Breaking
 
 Serve catalog discovery from the ready local mirror with complete filters and executable continuation.
