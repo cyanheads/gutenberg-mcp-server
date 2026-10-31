@@ -300,7 +300,7 @@ tool('gutenberg_get_text', {
     appliedLimit: z.number().describe('Character limit applied, at most 50,000.'),
     totalChars: z.number().describe('Total characters in the stripped literary text. Use with offset and length to determine progress and plan subsequent calls.'),
     remainingChars: z.number().describe('Characters remaining after this chunk (totalChars - offset - length). 0 means this chunk includes the end of the book.'),
-    hasMore: z.boolean().describe('True if there is more text after this chunk. When true, call again with offset = offset + length.'),
+    hasMore: z.boolean().describe('True if there is more text after this chunk. When true, call again with offset = offset + length and no find.'),
     provenance: z.string().describe('One-line source note: Project Gutenberg ID, title, and license URL. Always "Project Gutenberg eBook #{id}: {title} — https://www.gutenberg.org/ebooks/{id} — License: www.gutenberg.org/license".'),
     sourceFormat: z.enum(['text/plain; charset=utf-8', 'text/plain; charset=us-ascii', 'text/html'])
       .describe('The format that was fetched. "text/html" indicates HTML-to-text conversion was applied because no plain-text format was available.'),
@@ -383,7 +383,7 @@ tool('gutenberg_get_text', {
 })
 ```
 
-**`format()` rendering:** provenance and title (Markdown-escaped), chunk position, requested/applied limits, then literary text in a fence longer than any embedded backtick run. Structured text and offsets remain unchanged. A `find` read adds a `**Match:**` line with the match offset, length, and later-match count before the text. When `hasMore` is true, continue with `offset + length`; when `match.laterMatches` is above 0, a closing line gives the offset for the next occurrence with the same `find`.
+**`format()` rendering:** provenance and title (Markdown-escaped), chunk position, requested/applied limits, then literary text in a fence longer than any embedded backtick run. Structured text and offsets remain unchanged. A `find` read adds a `**Match:**` line with the match offset, length, and later-match count before the text. When `hasMore` is true, continue with `offset + length`, and a `find` read's closing line says to drop `find`, because keeping it jumps to the next occurrence or fails with `passage_not_found`. When `match.laterMatches` is above 0, a closing line gives the offset for the next occurrence with the same `find`.
 
 **Passage search (`find`):** one scan over the text the server already stores, from `offset`, with no index. The scan compares one key per UTF-16 code unit: case-folded, every whitespace unit collapsed into one key (and a run of them read as one), straight and curly quotes sharing a key. A unit whose case fold changes length compares as itself, so match offsets stay in stored-text coordinates. The first match sets `match`, the returned chunk starts there, and the same scan counts non-overlapping later matches. The caller's signal is checked before the scan, since nothing can abort it once it holds the event loop. `limit` still applies from the match start: trimming to a paragraph break never cuts before the match end, and a `limit` below the match length cuts the match short.
 

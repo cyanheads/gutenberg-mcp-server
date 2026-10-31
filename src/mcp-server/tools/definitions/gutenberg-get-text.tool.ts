@@ -79,7 +79,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     hasMore: z
       .boolean()
       .describe(
-        'True if there is more text after this chunk. When true, call again with offset = offset + length.',
+        'True if there is more text after this chunk. When true, call again with offset = offset + length and no find.',
       ),
     provenance: z
       .string()
@@ -314,7 +314,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     if (result.hasMore) {
       lines.push('');
       lines.push(
-        `_Call \`gutenberg_get_text\` again with id=${result.id}, offset=${end} to read the next chunk._`,
+        `_Call \`gutenberg_get_text\` again with id=${result.id}, offset=${end}${result.match ? ', and no find' : ''} to read the next chunk._`,
       );
     } else {
       lines.push('');

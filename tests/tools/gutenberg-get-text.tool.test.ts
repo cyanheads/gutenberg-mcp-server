@@ -456,6 +456,25 @@ describe('gutenbergGetText — find', () => {
     });
   });
 
+  it('reads on from a match only without find, as its next-chunk line says', async () => {
+    const find = 'Well, Prince';
+    const hit = await runToolContract(gutenbergGetText, { id: 84, find, limit: 5 });
+    const { length, offset } = hit.structuredContent as { length: number; offset: number };
+    const next = offset + length;
+    expect(wire(hit)).toContain(`offset=${next}, and no find to read the next chunk`);
+
+    const kept = await runToolContract(gutenbergGetText, { id: 84, find, offset: next });
+    expect(kept.structuredContent).toMatchObject({
+      error: { data: { reason: 'passage_not_found' } },
+    });
+
+    const dropped = await runToolContract(gutenbergGetText, { id: 84, offset: next, limit: 7 });
+    expect(dropped.structuredContent).toMatchObject({
+      offset: next,
+      text: PASSAGE_BOOK.slice(next, next + 7),
+    });
+  });
+
   it('fails an absent passage as passage_not_found on both surfaces, with no other chunk', async () => {
     const result = await runToolContract(gutenbergGetText, { id: 84, find: SENTINEL });
     const declared = gutenbergGetText.errors?.find((e) => e.reason === 'passage_not_found');
@@ -952,7 +971,16 @@ describe('gutenbergGetText — format()', () => {
   });
 
   it('keeps the next-chunk continuation beside the next-occurrence one', () => {
-    expect(render(matched)).toContain('offset=6658 to read the next chunk');
+    expect(render(matched)).toContain('offset=6658, and no find to read the next chunk');
+  });
+
+  it('says to drop find on the next-chunk line at laterMatches 0 too', () => {
+    const text = render({ ...matched, match: { ...matched.match, laterMatches: 0 } });
+    expect(text).toContain('with id=84, offset=6658, and no find to read the next chunk');
+  });
+
+  it('never mentions find on the next-chunk line of an ordinary read', () => {
+    expect(render(baseOutput)).toContain('with id=84, offset=38 to read the next chunk');
   });
 
   it('names the next occurrence on the last chunk too', () => {
