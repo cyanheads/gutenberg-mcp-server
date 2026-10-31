@@ -35,9 +35,9 @@ Project Gutenberg's library of 78,000+ public-domain books. Search by title, aut
 
 | Tool | Description |
 |:-----|:------------|
-| `gutenberg_search_books` | Search the catalog by title, author, topic, language, or author lifespan, with pagination and popularity sorting |
+| `gutenberg_search_books` | Search the catalog by title, author, topic, translator, language, or author lifespan, with pagination and popularity sorting |
 | `gutenberg_get_book` | Fetch complete metadata for a book by ID — authors, translators, editors, full formats map, subjects, copyright status |
-| `gutenberg_get_text` | Retrieve a book's plain-text content stripped of license boilerplate, with offset/limit chunking |
+| `gutenberg_get_text` | Retrieve a book's plain-text content stripped of license boilerplate, with offset/limit chunking or a `find` jump to a passage |
 | `gutenberg_browse_popular` | Browse the most-downloaded books, optionally filtered by language or topic |
 
 The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers deciding whether a book can be read, ruling out search blind spots before calling a book missing, finding openings and chapters past front matter, paging long texts, and ranking editions. Plugin installs include it; MCP clients can discover it through the Skills extension and its skill resource.
@@ -48,9 +48,10 @@ The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers 
 
 ### `gutenberg_search_books` <sub>tool</sub>
 
-- Filters: `query` (title/author words), `topic`, `languages` (ISO 639-1), `author_year_start`/`author_year_end`, `ids`, `mime_type`, and `copyright` (`"true"`, `"false"`, `"null"`; false means public domain in the USA). Live fallback rejects queries over four words
+- Filters: `query` (title/author words), `topic`, `translator`, `languages` (catalog codes exactly as results report them, two or three letters: `en`, not `eng`), `author_year_start`/`author_year_end`, `ids`, `mime_type`, and `copyright` (`"true"`, `"false"`, `"null"`; false means public domain in the USA). Live fallback rejects queries over four words and the `translator` filter
+- With both author-year bounds, one author must meet both. The live fallback checks the bounds separately and says so in a notice
 - `sort` is `popular` (default) or `ascending`/`descending` by Gutenberg ID. Up to 32 books per page; use `totalCount` and `hasMore` to page
-- Each result carries `is_readable` (readable by `gutenberg_get_text`) and `has_plain_text`. Fails with `query_requires_mirror`, `page_out_of_range`, or `catalog_unavailable`
+- Each result carries `is_readable` (readable by `gutenberg_get_text`) and `has_plain_text`. Result rows omit translators; `gutenberg_get_book` reports them. Fails with `translator_requires_mirror`, `query_requires_mirror`, `page_out_of_range`, or `catalog_unavailable`
 
 ---
 
@@ -66,7 +67,9 @@ The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers 
 
 - Reads a book in `offset`/`limit` chunks (default `limit` 20,000, capped at 50,000), with the Gutenberg license header and footer stripped. `requestedLimit` and `appliedLimit` report both
 - Prefers UTF-8 plain text and falls back to HTML converted to text; `sourceFormat` says which. Returns `totalChars`, `length`, `remainingChars`, `hasMore`, and `provenance` (ID, title, license URL). Use `length`, not `limit`, to compute the next `offset`
-- Fails with `not_found`, `audio_book` (`media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `text_file_not_found`, `text_fetch_rejected`, `invalid_text_response`, `text_fetch_failed`, or `catalog_unavailable`
+- `find` jumps to a passage instead of paging to it: the chunk starts at the first match at or after `offset`, and `match` reports its `offset`, `length`, and `laterMatches`. Matching ignores letter case and whitespace runs, and treats straight and curly quotes alike; accents and punctuation must match
+- Converted HTML editions blank every line that holds no visible character and keep each table row on one line, with tab-separated cells
+- Fails with `not_found`, `audio_book` (`media_type "Sound"`), `no_text_format`, `offset_out_of_range`, `passage_not_found`, `text_file_not_found`, `text_fetch_rejected`, `invalid_text_response`, `text_fetch_failed`, or `catalog_unavailable`
 
 ---
 

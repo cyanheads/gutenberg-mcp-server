@@ -59,6 +59,6 @@ gutenberg_browse_popular — top books by download_count, optionally by language
 - Catalog is **English-heavy but multilingual** (60+ languages) — expose the `languages` filter prominently.
 - Fully keyless and cache-friendly (the public-domain corpus barely changes) — cache catalog lookups and text aggressively.
 - Composes with book-metadata servers like `openlibrary` (match a Gutenberg book to its ISBN/editions/cover), and with `wikidata`/`wikipedia` (author context and work background). The pairing with `openlibrary` is the strongest: metadata there, full text here.
-- Moonshot: a "read-and-analyze" workflow — resolve a title, stream the text in chunks, and support search-within-book (find a passage/quote) so agents can do close reading without holding the whole novel in context.
+- A "read-and-analyze" workflow — resolve a title, read the text in chunks, and jump to a passage or quote with `find` so agents can do close reading without holding the whole novel in context.
 
 **README one-liner:** "78,000+ public-domain books with full text — search the classics and actually read them."

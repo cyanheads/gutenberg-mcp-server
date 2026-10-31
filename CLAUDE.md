@@ -56,7 +56,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z.string().optional().describe('Words to match against book titles and author names.'),
-    languages: z.array(z.string().min(2).max(2)).optional().describe('ISO 639-1 language codes.'),
+    languages: z.array(z.string().min(2).max(3)).optional().describe('Catalog language codes, exactly as results report them.'),
     page: z.number().int().positive().default(1).describe('Page number (1-indexed, up to 32 per page).'),
   }),
   output: z.object({
@@ -246,7 +246,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ## Structure
 
-Discovery uses the ready RDF mirror with Unicode substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with a notice and normalized typed criteria. MIME-prefix and tri-state copyright filters apply on both sources; browse continuation preserves them and repeats page 1 if its cap cuts the first page. Mirror schema v3 backfills Unicode-folded columns from existing rows in bounded batches without reharvesting. Live attempts consume the remaining 15-second catalog budget rather than restarting after five seconds.
+Discovery uses the ready RDF mirror with Unicode substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with a notice and normalized typed criteria. MIME-prefix and tri-state copyright filters apply on both sources; browse continuation preserves them and repeats page 1 if its cap cuts the first page. Mirror schema v4 backfills the Unicode-folded columns (v3) and the folded translator names (v4, written only for rows that list a translator) from existing rows in bounded batches without reharvesting; the mirror-only `translator` filter fails with `translator_requires_mirror` on live fallback. Live attempts consume the remaining 15-second catalog budget rather than restarting after five seconds.
 
 ```text
 src/
@@ -267,9 +267,9 @@ src/
       types.ts                          # Text service types
   mcp-server/
     tools/definitions/
-      gutenberg-search-books.tool.ts    # Search catalog by title/author/topic/language
+      gutenberg-search-books.tool.ts    # Search catalog by title/author/topic/translator/language
       gutenberg-get-book.tool.ts        # Fetch full metadata by ID
-      gutenberg-get-text.tool.ts        # Retrieve plain text with offset/limit chunking
+      gutenberg-get-text.tool.ts        # Retrieve plain text with offset/limit chunking or a find jump
       gutenberg-browse-popular.tool.ts  # Browse most-downloaded books
 ```
 
