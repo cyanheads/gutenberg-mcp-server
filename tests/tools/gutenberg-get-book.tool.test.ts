@@ -6,8 +6,18 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
+import {
+  ACTIVE_MARKDOWN,
+  contentText,
+  hostileLine,
+  hostileText,
+  lf,
+  PROPERTY_RUNS,
+  readBack,
+} from './markdown-read-back.js';
 
 vi.mock('@/services/gutendex/gutendex-service.js', () => ({
   getGutendexService: vi.fn(() => mockGutendexService),
@@ -389,6 +399,322 @@ describe('gutenbergGetBook — sparse and multi-summary records end to end', () 
     ]) {
       expect(text).toContain(line);
     }
+  });
+});
+
+// ── CommonMark read-back (#37) ───────────────────────────────────────────────
+//
+// Every assertion here reads a real parse of content[] against the raw catalog
+// string. format-parity's sentinels are alphanumeric, so the lint is clean with or
+// without an escape; these are the tests that notice a missing one.
+
+describe('gutenbergGetBook — content[] reads back as structuredContent', () => {
+  type BookOutput = Parameters<NonNullable<typeof gutenbergGetBook.format>>[0];
+  type Person = BookOutput['authors'][number];
+
+  const render = (book: BookOutput) => (gutenbergGetBook.format!(book)[0] as { text: string }).text;
+  const read = (book: BookOutput) => readBack(render(book));
+
+  const person = (p: Person) =>
+    p.birth_year != null || p.death_year != null
+      ? `${p.name} (${p.birth_year ?? '?'}–${p.death_year ?? '?'})`
+      : p.name;
+  const people = (list: Person[]) => (list.length > 0 ? list.map(person).join(', ') : 'None');
+
+  /** The page a reader should get, written from the raw values instead of from format(). */
+  function wantPage(book: BookOutput): string {
+    const list = (values: string[]) => (values.length > 0 ? values.join('; ') : 'None');
+    const summary = `Summary: ${lf(book.summary ?? 'Not available')}`;
+    const additional = book.summaries.filter((s) => s !== book.summary);
+    const additionalLine =
+      additional.length > 0
+        ? `Additional summaries (${additional.length}):`
+        : 'Additional summaries: None';
+    const notes = book.source_notes;
+    const mimes = Object.keys(book.formats);
+    return [
+      book.title,
+      [
+        `ID: ${book.id} | Media: ${book.media_type} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()}`,
+        `Authors: ${people(book.authors)}`,
+        `Translators: ${people(book.translators)}`,
+        `Editors: ${people(book.editors)}`,
+        `Languages: ${book.languages.join(', ')} | Copyright: Public Domain (USA)`,
+        `Subjects: ${list(book.subjects)}`,
+        `Bookshelves: ${list(book.bookshelves)}`,
+      ].join('\n'),
+      ...(notes?.length
+        ? [`${summary}\nSource notes:`, lf(notes.join('\n')), additionalLine]
+        : [`${summary}\nSource notes: ${notes ? 'None' : 'Not available'}\n${additionalLine}`]),
+      ...(additional.length > 0 ? [lf(additional.join('\n'))] : []),
+      'Plain text available: Yes | Readable: Yes — use gutenberg_get_text',
+      ...(mimes.length > 0 ? ['Formats:', mimes.join('\n')] : ['Formats: None']),
+    ].join('\n\n');
+  }
+
+  const austen = { name: 'Austen, Jane', birth_year: 1775, death_year: 1817 };
+  const active: Person = { name: ACTIVE_MARKDOWN, birth_year: 1775, death_year: 1817 };
+
+  /** Each case holds syntax in one slot only, so a failure names that slot's missing escape. */
+  it.each<[string, Partial<BookOutput>]>([
+    ['the title', { title: ACTIVE_MARKDOWN }],
+    ['the media type', { media_type: ACTIVE_MARKDOWN }],
+    ['an author name', { authors: [austen, active] }],
+    ['a translator name', { translators: [austen, active] }],
+    ['an editor name', { editors: [austen, active] }],
+    ['a language', { languages: ['en', ACTIVE_MARKDOWN] }],
+    ['a subject', { subjects: ['Fiction', ACTIVE_MARKDOWN] }],
+    ['a bookshelf', { bookshelves: ['Fiction', ACTIVE_MARKDOWN] }],
+    ['the summary', { summary: ACTIVE_MARKDOWN, summaries: [ACTIVE_MARKDOWN] }],
+    ['an additional summary', { summary: 'First.', summaries: ['First.', ACTIVE_MARKDOWN] }],
+  ])('reads %s back unchanged', (_slot, change) => {
+    const book = { ...mockBook, ...change };
+    expect(read(book).text).toBe(wantPage(book));
+  });
+
+  /** Catalog strings from the 2026-10-30 harvest, each a value Markdown used to rewrite. */
+  it.each<[number, string, Partial<BookOutput>]>([
+    [38430, 'the title', { title: 'The philosophy of Mr. B*rtr*nd R*ss*ll' }],
+    [
+      30121,
+      'the title',
+      { title: 'The Art of Confectionary: ... Figs, Grapes, &amp;c., Flowers and Herbs; ...' },
+    ],
+    [
+      117,
+      'the source notes',
+      {
+        source_notes: [
+          'Wikipedia page about this book: https://en.wikipedia.org/wiki/Symphony_No._5_(Beethoven)',
+          'Music file',
+        ],
+      },
+    ],
+    [
+      9204,
+      'the summary',
+      {
+        summary: "... part of Hawthorne's collection *Twice-Told Tales*. The collection ...",
+        summaries: ["... part of Hawthorne's collection *Twice-Told Tales*. The collection ..."],
+      },
+    ],
+  ])('book %i: %s reads back through the wire contract', async (id, _slot, change) => {
+    const book = { ...mockBook, id, ...change };
+    mockGutendexService.getBook.mockResolvedValue(book);
+    const result = await runToolContract(gutenbergGetBook, { id });
+    expect(result.structuredContent).toMatchObject(change);
+    expect(readBack(contentText(result)).text).toBe(wantPage(book));
+  });
+
+  it('leaves a value with nothing to encode byte-identical', () => {
+    const text = render({
+      ...mockBook,
+      authors: [austen],
+      subjects: ['Love stories -- Fiction'],
+      bookshelves: [],
+      summary: null,
+      summaries: [],
+    });
+    expect(text).toContain('**Authors:** Austen, Jane (1775–1817)');
+    expect(text).toContain('**Subjects:** Love stories -- Fiction');
+    expect(text).toContain('**Bookshelves:** None');
+    expect(text).toContain('**Source notes:** Not available');
+    expect(text).toContain('**Summary:** Not available');
+  });
+
+  describe('source_notes', () => {
+    const wikipedia =
+      'Wikipedia page about this book: https://en.wikipedia.org/wiki/Symphony_No._5_(Beethoven)';
+
+    it('keeps a note URL verbatim in the raw text (117)', () => {
+      expect(render({ ...mockBook, source_notes: [wikipedia] })).toContain(
+        'https://en.wikipedia.org/wiki/Symphony_No._5_(Beethoven)',
+      );
+    });
+
+    it('renders every note as one code block, with CRLF read back as LF (1)', () => {
+      const declaration =
+        "Project Gutenberg has three editions of this work:\r\n\r\n#1 is the original Project Gutenberg edition, and the world's first eBook.\r\n\r\nSee also #300, which is substantially the same.";
+      const notes = [
+        'Wikipedia page about this book: https://en.wikipedia.org/wiki/United_States_Declaration_of_Independence',
+        declaration,
+      ];
+      const code = read({ ...mockBook, source_notes: notes }).blocks.filter(
+        (block) => block.kind === 'code',
+      );
+      expect(code).toEqual([
+        {
+          container: undefined,
+          kind: 'code',
+          text: `${notes[0]}\n${declaration.replaceAll('\r\n', '\n')}`,
+        },
+      ]);
+    });
+
+    it('holds a backtick run and a tilde fence inside the block', () => {
+      const notes = ['```\ninside\n```', '~~~', '````` *five*'];
+      const doc = read({ ...mockBook, source_notes: notes });
+      expect(doc.blocks.filter((block) => block.kind === 'code').map((b) => b.text)).toEqual([
+        notes.join('\n'),
+      ]);
+      expect(doc.emphasis).toEqual([]);
+    });
+  });
+
+  describe('multi-line summaries', () => {
+    /** Book 503 carries this as its only summary; a blank line used to split the paragraph. */
+    const withBlankLine =
+      '"The Blue Fairy Book" by Andrew Lang is a collection of fairy tales published in 1889.\n\nThis groundbreaking volume launched a revolutionary series.';
+
+    it('holds a blank line in one paragraph (503)', () => {
+      const doc = read({ ...mockBook, summary: withBlankLine, summaries: [withBlankLine] });
+      expect(doc.blocks).toContainEqual({
+        container: undefined,
+        kind: 'paragraph',
+        text: `Summary: ${withBlankLine}\nSource notes: Not available\nAdditional summaries: None`,
+      });
+    });
+
+    it('keeps a blank line inside its list item as an additional summary', () => {
+      const doc = read({
+        ...mockBook,
+        summary: 'First.',
+        summaries: ['First.', withBlankLine, 'Last.'],
+        formats: {},
+      });
+      expect(doc.blocks.filter((block) => block.container === 'list')).toEqual([
+        { container: 'list', kind: 'paragraph', text: withBlankLine },
+        { container: 'list', kind: 'paragraph', text: 'Last.' },
+      ]);
+    });
+
+    it('keeps lines that read as block syntax inside the list item past the first break', () => {
+      const blocky = 'one\n\n2. two\n- three\n> four\n# five\n    six\n```\n---\n\n\nseven';
+      const doc = read({
+        ...mockBook,
+        summary: 'First.',
+        summaries: ['First.', blocky, 'Last.'],
+        formats: {},
+      });
+      expect(doc.blocks.filter((block) => block.container === 'list')).toEqual([
+        { container: 'list', kind: 'paragraph', text: blocky },
+        { container: 'list', kind: 'paragraph', text: 'Last.' },
+      ]);
+      expect(doc.blocks.filter((block) => block.kind === 'code')).toEqual([]);
+    });
+  });
+
+  describe('formats', () => {
+    it('parses each entry to a link: the MIME key as text, the URL as destination', () => {
+      expect(read(mockBook).links).toEqual([
+        {
+          href: 'https://www.gutenberg.org/ebooks/1342.txt.utf-8',
+          label: 'text/plain; charset=utf-8',
+        },
+        { href: 'https://www.gutenberg.org/ebooks/1342.html', label: 'text/html' },
+        {
+          href: 'https://www.gutenberg.org/ebooks/1342.epub.noimages',
+          label: 'application/epub+zip',
+        },
+      ]);
+    });
+
+    it('keeps a URL holding spaces and parentheses as one destination', () => {
+      const url = 'https://www.gutenberg.org/files/1/a b (c).pdf';
+      expect(read({ ...mockBook, formats: { 'application/pdf': url } }).links).toEqual([
+        { href: url, label: 'application/pdf' },
+      ]);
+    });
+
+    it.each(['javascript:alert(1)', 'data:text/html,x', '/files/1.txt', 'not a url'])(
+      'renders %s as literal text with no link',
+      (url) => {
+        const doc = read({ ...mockBook, formats: { 'text/html': url } });
+        expect(doc.links).toEqual([]);
+        expect(doc.blocks).toContainEqual({
+          container: 'list',
+          kind: 'paragraph',
+          text: `text/html (${url})`,
+        });
+      },
+    );
+
+    it('states an empty map like every other empty collection (69279)', () => {
+      const text = render({ ...mockBook, formats: {} });
+      expect(text).toContain('**Formats:** None');
+      expect(text.trimEnd().endsWith('**Formats:** None')).toBe(true);
+    });
+  });
+
+  it('reads any metadata back through the assembled page, joins included', () => {
+    const name = fc.record({
+      name: hostileLine,
+      birth_year: fc.constantFrom(null, 1775),
+      death_year: fc.constantFrom(null, 1817),
+    });
+    /** A final lone CR joins the LF the fence adds into one CRLF, so it reads back as nothing. */
+    const note = hostileText.filter((text) => !text.endsWith('\r'));
+    const book = fc
+      .record({
+        title: hostileLine,
+        media_type: hostileLine,
+        authors: fc.array(name, { maxLength: 2 }),
+        translators: fc.array(name, { maxLength: 2 }),
+        editors: fc.array(name, { maxLength: 2 }),
+        languages: fc.array(hostileLine, { maxLength: 2 }),
+        subjects: fc.array(hostileLine, { maxLength: 3 }),
+        bookshelves: fc.array(hostileLine, { maxLength: 3 }),
+        summaries: fc.array(hostileText, { maxLength: 3 }),
+        source_notes: fc.option(fc.array(note, { maxLength: 3 }), { nil: null }),
+      })
+      .map((fields) => ({ ...mockBook, ...fields, summary: fields.summaries[0] ?? null }));
+    fc.assert(
+      fc.property(book, (generated) => {
+        expect(read(generated).text).toBe(wantPage(generated));
+      }),
+      PROPERTY_RUNS,
+    );
+  });
+
+  it('reads any MIME key and http(s) URL back as a link', () => {
+    fc.assert(
+      fc.property(hostileLine, hostileLine, (mime, path) => {
+        const url = `https://x.test/${path}`;
+        expect(read({ ...mockBook, formats: { [mime]: url } }).links).toEqual([
+          { href: url, label: mime },
+        ]);
+      }),
+      PROPERTY_RUNS,
+    );
+  });
+
+  it('leaves a multi-value list with nothing to encode byte-identical', () => {
+    const text = render({
+      ...mockBook,
+      subjects: ['Love stories -- Fiction', 'England -- Fiction'],
+    });
+    expect(text).toContain('**Subjects:** Love stories -- Fiction; England -- Fiction');
+  });
+
+  /** The `; ` separator is escaped with its values, so an unterminated entity cannot complete there. */
+  it.each<[string, string[]]>([
+    ['a named entity', ['AT&amp', 'b']],
+    ['a decimal reference', ['&#35', 'b']],
+    ['a hexadecimal reference', ['&#x23', 'b']],
+    ['consecutive entities', ['&lt', '&gt', '&amp']],
+    ['entities among plain values', ['AT&amp', '&#35', 'tail']],
+    ['an ampersand before the separator', ['a&', 'b']],
+    ['a value that already holds a reference', ['&amp;&amp', 'b']],
+    ['a trailing backslash', ['a\\', 'b']],
+    ['a trailing space', ['a ', 'b']],
+    ['a trailing hash', ['a #', 'b']],
+    ['a trailing line break', ['a\n', 'b']],
+    ['syntax only the separator closes', ['*a', 'b*']],
+    ['a value of whitespace', [' ', 'b']],
+    ['edge whitespace on the last value', ['a', 'b  ']],
+  ])('reads %s back through the subject and bookshelf separator', (_case, values) => {
+    const book = { ...mockBook, subjects: values, bookshelves: values };
+    expect(read(book).text).toBe(wantPage(book));
   });
 });
 

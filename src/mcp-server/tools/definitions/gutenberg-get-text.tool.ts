@@ -6,13 +6,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getGutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
+import type { PassageMatch } from '@/services/gutenberg-text/types.js';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
 export const gutenbergGetText = tool('gutenberg_get_text', {
   title: 'Get Gutenberg Book Text',
   description:
-    'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard license header and footer. Front matter such as producer credits, the title page, contents, and prefaces stays in the text. For long works — novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than fetching the whole book at once. The response reports totalChars and remainingChars for reliable pagination. Prefers UTF-8 plain text; falls back to an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
+    'Retrieve the plain-text content of a Project Gutenberg book, stripped of the standard license header and footer. Front matter such as producer credits, the title page, contents, and prefaces stays in the text. For long works — novels routinely run 500KB–2MB — use offset and limit to read in chunks rather than fetching the whole book at once, or pass find to jump to a known passage without paging. The response reports totalChars and remainingChars for reliable pagination. Prefers UTF-8 plain text; falls back to an HTML edition converted to text; refuses audio books (media_type "Sound") with a clear error.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -29,7 +31,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .min(0)
       .default(0)
       .describe(
-        'Character offset into the stripped literary text at which to start reading. 0 returns the beginning of the work. To read subsequent chunks, use offset = prior_offset + prior_length (the length field from the previous response — NOT offset + limit, because the actual returned length may be slightly less than limit due to paragraph-boundary trimming).',
+        'Character offset into the stripped literary text at which to start reading. 0 returns the beginning of the work. To read subsequent chunks, use offset = prior_offset + prior_length (the length field from the previous response — NOT offset + limit, because the actual returned length may be slightly less than limit due to paragraph-boundary trimming). With find, the search starts here and the returned chunk starts at the match.',
       ),
     limit: z
       .number()
@@ -37,7 +39,14 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .min(1)
       .default(20000)
       .describe(
-        'Requested maximum characters. Default 20,000 (~4–5 pages of prose); requests above 50,000 are capped locally at 50,000. Paragraph-boundary trimming may return less than the applied limit — use length for continuation.',
+        'Requested maximum characters. Default 20,000 (~4–5 pages of prose); requests above 50,000 are capped locally at 50,000. Paragraph-boundary trimming may return less than the applied limit — use length for continuation. Trimming never cuts before a find match ends.',
+      ),
+    find: z
+      .string()
+      .trim()
+      .optional()
+      .describe(
+        'A passage to locate instead of paging to it: the response starts at the first occurrence at or after offset and adds match, and an absent passage fails with passage_not_found rather than returning other text. Matching ignores letter case and whitespace around find. Any run of spaces, tabs, or line breaks matches any other such run, so a hard-wrapped line still matches. Straight and curly quotes match each other. Accents count: "cafe" does not match "café". Everything else is literal, with no wildcards or patterns, so an italic word stored as _word_ needs its underscores. A blank find is an ordinary read.',
       ),
   }),
 
@@ -49,7 +58,9 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .describe(
         'The requested chunk of literary text, stripped of Gutenberg license boilerplate. Encoding: UTF-8. Line endings: normalized to LF.',
       ),
-    offset: z.number().describe('Character offset where this chunk begins.'),
+    offset: z
+      .number()
+      .describe('Character offset where this chunk begins: the match start when find matched.'),
     length: z.number().describe('Number of characters in this chunk.'),
     requestedLimit: z
       .number()
@@ -78,6 +89,24 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .describe(
         'The format that was fetched. "text/html" indicates HTML-to-text conversion was applied because no plain-text format was available.',
       ),
+    match: z
+      .object({
+        offset: z
+          .number()
+          .describe('Start of the match, in the same coordinates as offset and totalChars.'),
+        length: z
+          .number()
+          .describe(
+            'Characters the match spans in the stored text. Can differ from the length of find, since a whitespace run matches a run of any length.',
+          ),
+        laterMatches: z
+          .number()
+          .describe(
+            'Non-overlapping occurrences after this one. While above 0, repeat the same find with offset = match.offset + match.length for the next.',
+          ),
+      })
+      .optional()
+      .describe('Where find matched. Absent on a read without find.'),
   }),
 
   errors: [
@@ -132,6 +161,13 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       when: 'The offset is greater than or equal to totalChars (past the end of the book).',
       recovery:
         "Use an offset less than totalChars. A prior response's remainingChars field shows how much text is left.",
+    },
+    {
+      reason: 'passage_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'find has no occurrence at or after offset.',
+      recovery:
+        'Try a shorter phrase, or a lower offset if the passage may sit earlier in the book. Matching ignores letter case, treats any whitespace run as one space, and treats straight and curly quotes alike; accents, dashes, and underscores around italic words must match the text exactly.',
     },
     {
       reason: 'text_fetch_failed',
@@ -199,9 +235,27 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       );
     }
 
-    // Step 3: Chunk the text
+    /**
+     * Step 3: Locate the passage. ctx.state checks the signal before its read, not
+     * after, and no abort can land once the scan holds the event loop: check here.
+     */
+    let match: PassageMatch | undefined;
+    if (input.find) {
+      ctx.signal.throwIfAborted();
+      match = getGutenbergTextService().findPassage(cached, input.find, input.offset);
+      if (!match) {
+        throw ctx.fail(
+          'passage_not_found',
+          `Book ${input.id} has no occurrence of the passage at or after offset ${input.offset}.`,
+        );
+      }
+    }
+
+    // Step 4: Chunk the text
     const appliedLimit = Math.min(input.limit, 50000);
-    const chunk = getGutenbergTextService().chunkText(cached, input.offset, appliedLimit);
+    const chunk = match
+      ? getGutenbergTextService().chunkText(cached, match.offset, appliedLimit, match.length)
+      : getGutenbergTextService().chunkText(cached, input.offset, appliedLimit);
 
     const provenance = `Project Gutenberg eBook #${input.id}: ${book.title} — https://www.gutenberg.org/ebooks/${input.id} — License: www.gutenberg.org/license`;
 
@@ -218,15 +272,16 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       hasMore: chunk.hasMore,
       provenance,
       sourceFormat: chunk.sourceFormat,
+      ...(match && { match }),
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
 
-    lines.push(`_${result.provenance}_`);
+    lines.push(`_${escapeMarkdownInline(result.provenance)}_`);
     lines.push('');
-    lines.push(`**[${result.id}] ${result.title}**`);
+    lines.push(`**[${result.id}]** ${escapeMarkdownInline(result.title)}`);
     lines.push('');
 
     const end = result.offset + result.length;
@@ -239,6 +294,12 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       `Requested limit: ${result.requestedLimit.toLocaleString()} | Applied limit: ${result.appliedLimit.toLocaleString()}`,
     );
     lines.push('');
+    if (result.match) {
+      lines.push(
+        `**Match:** offset ${result.match.offset.toLocaleString()} | length ${result.match.length.toLocaleString()} | ${result.match.laterMatches.toLocaleString()} later`,
+      );
+      lines.push('');
+    }
     let longestRun = 0;
     let run = 0;
     for (const character of result.text) {
@@ -258,6 +319,13 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     } else {
       lines.push('');
       lines.push('_End of book._');
+    }
+
+    if (result.match && result.match.laterMatches > 0) {
+      lines.push('');
+      lines.push(
+        `_Call \`gutenberg_get_text\` again with id=${result.id}, the same find, and offset=${result.match.offset + result.match.length} for the next occurrence._`,
+      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

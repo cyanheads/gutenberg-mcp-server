@@ -6,8 +6,17 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergBrowsePopular } from '@/mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
+import {
+  ACTIVE_MARKDOWN,
+  contentText,
+  hostileLine,
+  hostileText,
+  PROPERTY_RUNS,
+  readBack,
+} from './markdown-read-back.js';
 
 vi.mock('@/services/gutendex/gutendex-service.js', () => ({
   getGutendexService: vi.fn(() => mockGutendexService),
@@ -108,6 +117,16 @@ describe('gutenbergBrowsePopular', () => {
       'No books matched',
     );
   });
+
+  it('rejects translator as an unknown key before reaching the service', async () => {
+    const result = await runToolContract(gutenbergBrowsePopular, {
+      // @ts-expect-error Exercise an unknown wire argument through the production schema boundary.
+      translator: 'maude',
+    });
+    expect(result.isError).toBe(true);
+    expect(mockGutendexService.searchBooks).not.toHaveBeenCalled();
+  });
+
   it('renders readability and the snapshot window for counts and the omitted-result ceiling', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [{ ...makeBook(1), is_readable: true, has_plain_text: false }],
@@ -513,6 +532,205 @@ describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
     expect(structured.truncationCeiling).toBe(makeBook(5).download_count);
     expect(text).toContain('more matching books');
     expect(text).toContain('gutenberg_search_books');
+  });
+});
+
+// ── CommonMark read-back (#31, #37) ──────────────────────────────────────────
+//
+// Every assertion here reads a real parse of content[] against the raw value.
+// format-parity's sentinels never reach an escape, so the lint proves nothing here.
+
+describe('gutenbergBrowsePopular — content[] reads back as structuredContent', () => {
+  type BrowseOutput = Parameters<NonNullable<typeof gutenbergBrowsePopular.format>>[0];
+  type Row = BrowseOutput['books'][number];
+
+  const row: Row = {
+    id: 1342,
+    title: 'Pride and Prejudice',
+    authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+    languages: ['en'],
+    download_count: 75000,
+    has_plain_text: true,
+    is_readable: true,
+  };
+  const render = (books: Row[]) =>
+    (
+      gutenbergBrowsePopular.format!({
+        requestedLimit: 32,
+        appliedLimit: 32,
+        books,
+        totalInCatalog: books.length,
+      })[0] as { text: string }
+    ).text;
+
+  /** The list a reader should get, written from the raw values instead of from format(). */
+  function wantList(books: Row[]): string {
+    const items = books.map((book) => {
+      const authors = book.authors.map((a) => `${a.name} (${a.birth_year ?? '?'}–${a.death_year})`);
+      return `[${book.id}] ${book.title} — ${authors.join(', ') || 'Unknown'}\nLang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: Yes | Readable: Yes`;
+    });
+    return `Top ${books.length} of ${books.length} books in catalog\n\nRequested limit: 32 | Applied limit: 32\n\n${items.join('\n')}`;
+  }
+
+  const active = { name: ACTIVE_MARKDOWN, birth_year: 1775, death_year: 1817 };
+
+  /** Each case holds syntax in one slot only, so a failure names that slot's missing escape. */
+  it.each<[string, Partial<Row>]>([
+    ['the title', { title: ACTIVE_MARKDOWN }],
+    ['an author name', { authors: [row.authors[0]!, active] }],
+    ['a language', { languages: ['en', ACTIVE_MARKDOWN] }],
+  ])('reads %s back unchanged', (_slot, change) => {
+    const books = [{ ...row, ...change }, row];
+    expect(readBack(render(books)).text).toBe(wantList(books));
+  });
+
+  /** Titles from the 2026-10-30 catalog harvest, 30121 abridged. */
+  it.each([
+    [38430, 'The philosophy of Mr. B*rtr*nd R*ss*ll'],
+    [30121, 'The Art of Confectionary: ... Figs, Grapes, &amp;c., Flowers and Herbs; ...'],
+  ])('reads the title of %i back through the wire contract', async (id, title) => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [{ ...makeBook(id), title }],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergBrowsePopular, {});
+    expect((result.structuredContent as BrowseOutput).books[0]?.title).toBe(title);
+    expect(readBack(contentText(result)).blocks[2]).toEqual({
+      container: 'list',
+      kind: 'paragraph',
+      text: `[${id}] ${title} — Author ${id} (1800–1900)\nLang: en | Downloads in the last 30 days (source snapshot): ${(10000 - id).toLocaleString()} | Plain text: Yes | Readable: Yes`,
+    });
+  });
+
+  it('leaves a value with nothing to encode byte-identical', () => {
+    expect(render([row])).toContain(
+      '1. **[1342]** Pride and Prejudice — Austen, Jane (1775–1817)\n   Lang: en | Downloads',
+    );
+  });
+
+  it('reads any row back through the assembled list, past nine items', () => {
+    const person = fc.record({
+      name: hostileLine,
+      birth_year: fc.constantFrom(null, 1775),
+      death_year: fc.constant(1817),
+    });
+    const generated = fc.record({
+      title: hostileLine,
+      authors: fc.array(person, { maxLength: 2 }),
+      languages: fc.array(hostileLine, { minLength: 1, maxLength: 2 }),
+    });
+    fc.assert(
+      fc.property(fc.array(generated, { minLength: 1, maxLength: 11 }), (rows) => {
+        const books = rows.map((fields) => ({ ...row, ...fields }));
+        expect(readBack(render(books)).text).toBe(wantList(books));
+      }),
+      { ...PROPERTY_RUNS, numRuns: 200 },
+    );
+  });
+
+  describe('criteria and continuation trailers', () => {
+    const matches = (count: number) => ({
+      books: Array.from({ length: 2 }, (_, i) => makeBook(i + 1)),
+      totalCount: count,
+      hasMore: false,
+      page: 1,
+    });
+    const paragraphOf = (markdown: string, start: string) =>
+      readBack(markdown).blocks.find((block) => block.text.startsWith(start))?.text;
+
+    it.each<[string, string, string]>([
+      [
+        'a quoted phrase',
+        '"Terra Nova"',
+        String.raw`{"topic":"\"Terra Nova\"","sort":"popular","page":1}`,
+      ],
+      ['emphasis', '*war*', '{"topic":"*war*","sort":"popular","page":1}'],
+      ['a lone backtick', 'a`b', '{"topic":"a`b","sort":"popular","page":1}'],
+      ['a line break', 'a\nb', String.raw`{"topic":"a\nb","sort":"popular","page":1}`],
+      ['accents', 'Édouard', '{"topic":"Édouard","sort":"popular","page":1}'],
+    ])('holds %s in a code span on the criteria line', async (_case, topic, json) => {
+      mockGutendexService.searchBooks.mockResolvedValue(matches(2));
+      const result = await runToolContract(gutenbergBrowsePopular, { topic });
+      const doc = readBack(contentText(result));
+      const { effectiveCriteria } = result.structuredContent as { effectiveCriteria: unknown };
+
+      expect(doc.codeSpans).toEqual([json]);
+      expect(JSON.parse(doc.codeSpans[0]!)).toEqual(effectiveCriteria);
+      expect(paragraphOf(contentText(result), 'Browse criteria: ')).toContain(
+        `Browse criteria: ${json}\n`,
+      );
+    });
+
+    it('parses the continuation span back to the executable arguments', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue(matches(5));
+      const result = await runToolContract(gutenbergBrowsePopular, {
+        topic: '"Terra Nova"',
+        limit: 1,
+      });
+      const { continuation } = result.structuredContent as {
+        continuation: { tool: string; arguments: Record<string, unknown> };
+      };
+      const json = String.raw`{"topic":"\"Terra Nova\"","sort":"popular","page":1}`;
+
+      expect(continuation).toEqual({
+        tool: 'gutenberg_search_books',
+        arguments: { topic: '"Terra Nova"', sort: 'popular', page: 1 },
+      });
+      const doc = readBack(contentText(result));
+      expect(doc.codeSpans).toEqual([json, json]);
+      expect(JSON.parse(doc.codeSpans[1]!)).toEqual(continuation.arguments);
+      expect(paragraphOf(contentText(result), 'Browse criteria: ')).toContain(
+        `\nContinue with gutenberg_search_books ${json}. Page 1 repeats the first page when the browse cap leaves unseen books on it.\n`,
+      );
+    });
+
+    it('holds any caller text in spans that parse back to both structured values', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue(matches(5));
+      await fc.assert(
+        fc.asyncProperty(hostileText, hostileLine, async (topic, mime_type) => {
+          const result = await runToolContract(gutenbergBrowsePopular, {
+            topic,
+            mime_type,
+            limit: 1,
+          });
+          const { effectiveCriteria, continuation } = result.structuredContent as {
+            continuation: { arguments: unknown };
+            effectiveCriteria: unknown;
+          };
+          const { codeSpans } = readBack(contentText(result));
+          expect(codeSpans).toEqual([
+            JSON.stringify(effectiveCriteria),
+            JSON.stringify(continuation.arguments),
+          ]);
+          expect(JSON.parse(codeSpans[0]!)).toEqual(effectiveCriteria);
+          expect(JSON.parse(codeSpans[1]!)).toEqual(continuation.arguments);
+        }),
+        { ...PROPERTY_RUNS, numRuns: 200 },
+      );
+    });
+
+    it('keeps the criteria line and notice on an empty result', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue({
+        books: [],
+        totalCount: 0,
+        hasMore: false,
+        page: 1,
+      });
+      const result = await runToolContract(gutenbergBrowsePopular, {
+        topic: '*war*',
+        languages: ['eng'],
+      });
+      const { notice } = result.structuredContent as { notice: string };
+
+      expect(notice).toContain('English is "en", not "eng".');
+      const doc = readBack(contentText(result));
+      expect(doc.codeSpans).toEqual([
+        '{"languages":["eng"],"topic":"*war*","sort":"popular","page":1}',
+      ]);
+      expect(doc.blocks).toContainEqual({ container: 'quote', kind: 'paragraph', text: notice });
+    });
   });
 });
 

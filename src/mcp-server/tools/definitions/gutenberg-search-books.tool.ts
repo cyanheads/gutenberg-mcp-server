@@ -1,19 +1,24 @@
 /**
  * @fileoverview Tool for searching the Project Gutenberg catalog by title, author,
- * topic, language, author lifespan, or a specific list of IDs.
+ * topic, language, translator, author lifespan, or a specific list of IDs.
  * @module mcp-server/tools/definitions/gutenberg-search-books
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 import { normalizeSearchParams } from '@/services/gutendex/types.js';
-import { discoveryCriteria, discoveryFilters } from '../discovery-criteria.js';
+import {
+  discoveryCriteria,
+  discoveryFilters,
+  withLanguageCodeHint,
+} from '../discovery-criteria.js';
 
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   title: 'Search Gutenberg Books',
   description:
-    'Search the Project Gutenberg catalog of 78,000+ books. Every query word matches a title or author substring; filter by topic, language, author lifespan, IDs, MIME prefix or copyright status. More than four query words require the local mirror. Empty matches succeed with criteria and a notice. Default popularity uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
+    'Search the Project Gutenberg catalog of 78,000+ books. Every query word matches a title or author substring; filter by topic, language, translator, author lifespan, IDs, MIME prefix or copyright status. More than four query words, and the translator filter, require the local mirror. Empty matches succeed with criteria and a notice. Default popularity uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -31,25 +36,31 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       .describe(
         'Case-insensitive phrase to match against subjects and bookshelves. Example: "detective" returns books on the "Detective and Mystery Stories" bookshelf. Separate from query — topic searches categorization metadata, not title/author.',
       ),
-    languages: z
-      .array(z.string().min(2).max(2))
+    translator: z
+      .string()
       .optional()
       .describe(
-        'Filter to books in any of these two-character ISO 639-1 language codes. Example: ["en"] for English, ["fr", "de"] for French or German.',
+        'Every nonblank whitespace-separated word must match a translator name as a case-insensitive literal substring; words can land on different translators of one book, and accents must match. Requires the local mirror. Example: "maude" finds the Aylmer and Louise Maude translations. Result rows omit translators; gutenberg_get_book reports them.',
+      ),
+    languages: z
+      .array(z.string().min(2).max(3))
+      .optional()
+      .describe(
+        'Filter to books in any of these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English, ["fr", "de"] for French or German, ["enm"] for Middle English.',
       ),
     author_year_start: z
       .number()
       .int()
       .optional()
       .describe(
-        'Include only books with at least one author alive on or after this year (positive = CE, negative = BCE). Combine with author_year_end for a range.',
+        'Include only books with an author who has a known birth or death year on or after this year (positive = CE, negative = BCE). With author_year_end, one author must meet both bounds.',
       ),
     author_year_end: z
       .number()
       .int()
       .optional()
       .describe(
-        'Include only books with at least one author alive on or before this year. Example: author_year_start=1800 with author_year_end=1899 returns books with 19th-century authors.',
+        'Include only books with an author who has a known birth or death year on or before this year. With author_year_start, one author must meet both bounds. Example: author_year_start=1800 with author_year_end=1899 returns books with 19th-century authors.',
       ),
     sort: z
       .enum(['popular', 'ascending', 'descending'])
@@ -101,9 +112,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
                   .describe('Author entry.'),
               )
               .describe('Author(s) of the work.'),
-            languages: z
-              .array(z.string())
-              .describe('Two-character language codes for this edition.'),
+            languages: z.array(z.string()).describe('Catalog language codes for this edition.'),
             subjects: z.array(z.string()).describe('Library of Congress subject headings.'),
             download_count: z
               .number()
@@ -131,13 +140,29 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
     effectiveCriteria: discoveryCriteria.describe(
       'Normalized search criteria, including sort and page defaults.',
     ),
-    notice: z.string().optional().describe('Actionable guidance for an empty selection.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Actionable guidance for an empty selection, or a caveat that the live catalog checked author_year_start and author_year_end separately. The caveat can accompany results.',
+      ),
   },
   enrichmentTrailer: {
-    effectiveCriteria: { render: (value) => `Search criteria: ${JSON.stringify(value)}` },
+    effectiveCriteria: {
+      render: (value) =>
+        markdown().text('Search criteria: ').inlineCode(JSON.stringify(value)).build(),
+    },
   },
 
   errors: [
+    {
+      reason: 'translator_requires_mirror',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A translator filter was supplied while the local mirror could not answer.',
+      recovery:
+        'Remove the translator filter and read translators from gutenberg_get_book, or ask the server operator to initialize or repair the local catalog mirror.',
+      thrownBy: 'service',
+    },
     {
       reason: 'query_requires_mirror',
       code: JsonRpcErrorCode.ValidationError,
@@ -171,12 +196,19 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
     ctx.log.info('Searching Gutenberg catalog', {
       query: input.query,
       topic: input.topic,
+      translator: input.translator,
       languages: input.languages,
       page: input.page,
     });
 
     const result = await (input.ids?.length === 0
-      ? Promise.resolve({ books: [], totalCount: 0, hasMore: false, page: input.page })
+      ? Promise.resolve({
+          books: [],
+          totalCount: 0,
+          hasMore: false,
+          page: input.page,
+          source: 'none' as const,
+        })
       : getGutendexService().searchBooks(criteria, ctx)
     ).catch((err: unknown) => {
       // The service tags a page-beyond-range 404 with reason 'page_out_of_range';
@@ -197,13 +229,28 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       throw err;
     });
 
-    if (result.books.length === 0) {
-      ctx.enrich.notice(
-        input.ids?.length === 0
-          ? 'The empty ID selection selects no books. Supply one or more IDs, or omit ids to search the catalog.'
-          : 'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+    /** `notice` holds one value and the last write wins, so this call composes every sentence. */
+    const notices: string[] = [];
+    if (
+      result.source === 'live' &&
+      criteria.author_year_start !== undefined &&
+      criteria.author_year_end !== undefined
+    ) {
+      notices.push(
+        'The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound.',
       );
     }
+    if (result.books.length === 0) {
+      notices.push(
+        input.ids?.length === 0
+          ? 'The empty ID selection selects no books. Supply one or more IDs, or omit ids to search the catalog.'
+          : withLanguageCodeHint(
+              'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+              criteria.languages,
+            ),
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       books: result.books.map((b) => ({
@@ -237,17 +284,19 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
                   a.birth_year != null || a.death_year != null
                     ? ` (${a.birth_year ?? '?'}–${a.death_year ?? '?'})`
                     : '';
-                return `${a.name}${years}`;
+                return `${escapeMarkdownInline(a.name)}${years}`;
               })
               .join(', ')
           : 'Unknown';
-      lines.push(`**[${book.id}]** ${book.title}`);
+      lines.push(`**[${book.id}]** ${escapeMarkdownInline(book.title)}`);
       lines.push(
-        `  Authors: ${authorStr} | Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
+        `  Authors: ${authorStr} | Lang: ${book.languages.map(escapeMarkdownInline).join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
       );
       // Unconditional: structuredContent carries `subjects: []` verbatim, so a
       // content[]-only client needs the empty case stated, not the line dropped.
-      lines.push(`  Subjects: ${book.subjects.length > 0 ? book.subjects.join('; ') : 'None'}`);
+      lines.push(
+        `  Subjects: ${book.subjects.length > 0 ? escapeMarkdownInline(book.subjects.join('; ')) : 'None'}`,
+      );
     }
     if (result.hasMore) {
       lines.push('');

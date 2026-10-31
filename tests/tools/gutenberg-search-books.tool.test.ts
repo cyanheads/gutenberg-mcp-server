@@ -6,8 +6,17 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
+import {
+  ACTIVE_MARKDOWN,
+  contentText,
+  hostileLine,
+  hostileText,
+  PROPERTY_RUNS,
+  readBack,
+} from './markdown-read-back.js';
 
 // Mock the service module — tests control what searchBooks returns
 vi.mock('@/services/gutendex/gutendex-service.js', () => ({
@@ -180,6 +189,53 @@ describe('gutenbergSearchBooks', () => {
       totalCount: 0,
       hasMore: false,
     });
+  });
+
+  it('adds the live-catalog caveat to a non-empty result only for both bounds on the live source', async () => {
+    const caveat =
+      'The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound.';
+    const page = { books: [mockBook], totalCount: 1, hasMore: false, page: 1 };
+    mockGutendexService.searchBooks.mockResolvedValue({ ...page, source: 'live' });
+    const both = { author_year_start: 1800, author_year_end: 1899 };
+    const live = await runToolContract(gutenbergSearchBooks, both);
+    expect(live.structuredContent).toMatchObject({ totalCount: 1, notice: caveat });
+    expect(live.structuredContent).not.toHaveProperty('source');
+    expect(contentText(live)).toContain(caveat);
+
+    const oneBound = await runToolContract(gutenbergSearchBooks, { author_year_start: 1800 });
+    expect(oneBound.structuredContent).not.toHaveProperty('notice');
+
+    mockGutendexService.searchBooks.mockResolvedValue({ ...page, source: 'mirror' });
+    const mirrored = await runToolContract(gutenbergSearchBooks, both);
+    expect(mirrored.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('passes the normalized translator to the service and echoes it', async () => {
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [mockBook],
+      totalCount: 1,
+      hasMore: false,
+      page: 1,
+      source: 'mirror',
+    });
+    const result = await runToolContract(gutenbergSearchBooks, {
+      translator: '  Maude \t Louise ',
+    });
+    expect(mockGutendexService.searchBooks).toHaveBeenCalledWith(
+      expect.objectContaining({ translator: 'Maude Louise' }),
+      expect.anything(),
+    );
+    expect(result.structuredContent).toMatchObject({
+      effectiveCriteria: { translator: 'Maude Louise' },
+    });
+  });
+
+  it('declares translator_requires_mirror with an actionable recovery', () => {
+    const declared = gutenbergSearchBooks.errors?.find(
+      (entry) => entry.reason === 'translator_requires_mirror',
+    );
+    expect(declared).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    expect(declared?.recovery).toContain('gutenberg_get_book');
   });
 
   it('propagates service errors', async () => {
@@ -448,6 +504,265 @@ describe('gutenbergSearchBooks — subject-free results', () => {
 });
 
 // ── Catalog outage contract (#12) ────────────────────────────────────────────
+
+// ── CommonMark read-back (#31, #37) ──────────────────────────────────────────
+//
+// Every assertion here reads a real parse of content[] against the raw value.
+// format-parity's sentinels never reach an escape, so the lint proves nothing here.
+
+describe('gutenbergSearchBooks — content[] reads back as structuredContent', () => {
+  type SearchOutput = Parameters<NonNullable<typeof gutenbergSearchBooks.format>>[0];
+  type Row = SearchOutput['books'][number];
+
+  const row: Row = {
+    id: 1342,
+    title: 'Pride and Prejudice',
+    authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+    languages: ['en'],
+    subjects: ['Love stories -- Fiction'],
+    download_count: 75000,
+    has_plain_text: true,
+    is_readable: true,
+  };
+  const page = (books: Row[]): SearchOutput => ({
+    books,
+    totalCount: books.length,
+    page: 1,
+    hasMore: false,
+  });
+  const render = (books: Row[]) =>
+    (gutenbergSearchBooks.format!(page(books))[0] as { text: string }).text;
+
+  /** The rows a reader should get, written from the raw values instead of from format(). */
+  function wantRows(books: Row[]): string {
+    const lines = books.flatMap((book) => {
+      const authors = book.authors.map((a) => `${a.name} (${a.birth_year ?? '?'}–${a.death_year})`);
+      return [
+        `[${book.id}] ${book.title}`,
+        `Authors: ${authors.join(', ') || 'Unknown'} | Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: Yes | Readable: Yes`,
+        `Subjects: ${book.subjects.join('; ') || 'None'}`,
+      ];
+    });
+    return `${books.length} books found (page 1)\n\n${lines.join('\n')}`;
+  }
+
+  const active = { name: ACTIVE_MARKDOWN, birth_year: 1775, death_year: 1817 };
+
+  /** Each case holds syntax in one slot only, so a failure names that slot's missing escape. */
+  it.each<[string, Partial<Row>]>([
+    ['the title', { title: ACTIVE_MARKDOWN }],
+    ['an author name', { authors: [row.authors[0]!, active] }],
+    ['a language', { languages: ['en', ACTIVE_MARKDOWN] }],
+    ['a subject', { subjects: ['Fiction', ACTIVE_MARKDOWN] }],
+  ])('reads %s back unchanged', (_slot, change) => {
+    const books = [{ ...row, ...change }, row];
+    expect(readBack(render(books)).text).toBe(wantRows(books));
+  });
+
+  /** Titles from the 2026-10-30 catalog harvest: 38430 lost asterisks, 30121 (abridged) an entity. */
+  it('reads catalog titles back through the wire contract', async () => {
+    const [philosophy, confectionary] = [
+      'The philosophy of Mr. B*rtr*nd R*ss*ll',
+      'The Art of Confectionary: ... Figs, Grapes, &amp;c., Flowers and Herbs; ...',
+    ];
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [
+        { ...mockBook, id: 38430, title: philosophy },
+        { ...mockBook, id: 30121, title: confectionary },
+      ],
+      totalCount: 2,
+      hasMore: false,
+      page: 1,
+    });
+    const result = await runToolContract(gutenbergSearchBooks, { ids: [38430, 30121] });
+    expect((result.structuredContent as SearchOutput).books.map((b) => b.title)).toEqual([
+      philosophy,
+      confectionary,
+    ]);
+    const { text } = readBack(contentText(result));
+    expect(text).toContain(`[38430] ${philosophy}\nAuthors: Austen, Jane (1775–1817)`);
+    expect(text).toContain(`[30121] ${confectionary}\nAuthors: Austen, Jane (1775–1817)`);
+  });
+
+  it('leaves a value with nothing to encode byte-identical', () => {
+    const text = render([{ ...row, subjects: ['Love stories -- Fiction'] }]);
+    expect(text).toContain('**[1342]** Pride and Prejudice');
+    expect(text).toContain('  Authors: Austen, Jane (1775–1817) | Lang: en | Downloads');
+    expect(text).toContain('  Subjects: Love stories -- Fiction');
+  });
+
+  it('completes no entity from the subject separator', () => {
+    const books = [{ ...row, subjects: ['AT&amp', '&#35', 'tail'] }];
+    expect(readBack(render(books)).text).toBe(wantRows(books));
+  });
+
+  it('reads any row back through the assembled page, joins included', () => {
+    const person = fc.record({
+      name: hostileLine,
+      birth_year: fc.constantFrom(null, 1775),
+      death_year: fc.constant(1817),
+    });
+    const generated = fc.record({
+      title: hostileLine,
+      authors: fc.array(person, { maxLength: 2 }),
+      languages: fc.array(hostileLine, { minLength: 1, maxLength: 2 }),
+      subjects: fc.array(hostileLine, { maxLength: 3 }),
+    });
+    fc.assert(
+      fc.property(fc.array(generated, { minLength: 1, maxLength: 3 }), (rows) => {
+        const books = rows.map((fields) => ({ ...row, ...fields }));
+        expect(readBack(render(books)).text).toBe(wantRows(books));
+      }),
+      PROPERTY_RUNS,
+    );
+  });
+
+  describe('criteria trailer', () => {
+    const empty = { books: [], totalCount: 0, hasMore: false, page: 1, source: 'mirror' };
+
+    it.each<[string, Record<string, unknown>, string]>([
+      ['emphasis', { query: '*war*' }, '{"query":"*war*","sort":"popular","page":1}'],
+      ['underscores', { query: '_war_' }, '{"query":"_war_","sort":"popular","page":1}'],
+      [
+        'a quoted phrase',
+        { query: '"war and peace"' },
+        String.raw`{"query":"\"war and peace\"","sort":"popular","page":1}`,
+      ],
+      ['a lone backtick', { query: 'a`b' }, '{"query":"a`b","sort":"popular","page":1}'],
+      ['paired backticks', { query: '`a`' }, '{"query":"`a`","sort":"popular","page":1}'],
+      ['a backslash', { query: 'a\\*b' }, String.raw`{"query":"a\\*b","sort":"popular","page":1}`],
+      ['an entity', { query: '&amp;' }, '{"query":"&amp;","sort":"popular","page":1}'],
+      ['a link', { query: '[a](b)' }, '{"query":"[a](b)","sort":"popular","page":1}'],
+      [
+        'a query line break',
+        { query: 'war\npeace' },
+        '{"query":"war peace","sort":"popular","page":1}',
+      ],
+      [
+        'a topic line break',
+        { topic: 'war\npeace' },
+        String.raw`{"topic":"war\npeace","sort":"popular","page":1}`,
+      ],
+      ['accents', { topic: 'Édouard' }, '{"topic":"Édouard","sort":"popular","page":1}'],
+      [
+        'a translator',
+        { translator: '*Maude*' },
+        '{"translator":"*Maude*","sort":"popular","page":1}',
+      ],
+    ])('parses %s to one span holding the JSON text', async (_case, input, json) => {
+      mockGutendexService.searchBooks.mockResolvedValue(empty);
+      const result = await runToolContract(gutenbergSearchBooks, input);
+      const doc = readBack(contentText(result));
+
+      expect(doc.codeSpans).toEqual([json]);
+      expect(doc.blocks).toContainEqual({
+        container: undefined,
+        kind: 'paragraph',
+        text: `Search criteria: ${json}`,
+      });
+      const { effectiveCriteria } = result.structuredContent as { effectiveCriteria: unknown };
+      expect(JSON.parse(doc.codeSpans[0]!)).toEqual(effectiveCriteria);
+      expect(doc.codeSpans[0]).toBe(JSON.stringify(effectiveCriteria));
+    });
+
+    it('holds any caller text in one span that parses back to the criteria', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue(empty);
+      const input = fc.record({
+        query: hostileText,
+        topic: hostileText,
+        mime_type: hostileLine,
+        translator: hostileLine,
+      });
+      await fc.assert(
+        fc.asyncProperty(input, async (generated) => {
+          const result = await runToolContract(gutenbergSearchBooks, generated);
+          const { effectiveCriteria } = result.structuredContent as { effectiveCriteria: unknown };
+          const { codeSpans } = readBack(contentText(result));
+          expect(codeSpans).toEqual([JSON.stringify(effectiveCriteria)]);
+          expect(JSON.parse(codeSpans[0]!)).toEqual(effectiveCriteria);
+        }),
+        { ...PROPERTY_RUNS, numRuns: 200 },
+      );
+    });
+
+    it('keeps the criteria line and notice on an empty result, the structured echo unchanged', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue(empty);
+      const result = await runToolContract(gutenbergSearchBooks, { query: '*war*' });
+      expect(result.structuredContent).toMatchObject({
+        books: [],
+        effectiveCriteria: { query: '*war*', sort: 'popular', page: 1 },
+        notice:
+          'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+      });
+      expect(readBack(contentText(result)).blocks.map((block) => block.text)).toEqual([
+        '0 books found (page 1)',
+        'Search criteria: {"query":"*war*","sort":"popular","page":1}',
+        'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+      ]);
+    });
+  });
+
+  describe('notice', () => {
+    /** A notice is static text the framework quotes: it must read back as structuredContent has it. */
+    const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) => ({
+      read: readBack(contentText(result)).blocks.filter((block) => block.container === 'quote'),
+      structured: (result.structuredContent as { notice: string }).notice,
+    });
+
+    it('reads the language-code hint back from an empty three-letter-code result', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue({
+        books: [],
+        totalCount: 0,
+        hasMore: false,
+        page: 1,
+        source: 'mirror',
+      });
+      const { read, structured } = noticeOf(
+        await runToolContract(gutenbergSearchBooks, { languages: ['eng'] }),
+      );
+      expect(structured).toContain('English is "en", not "eng".');
+      expect(read).toEqual([{ container: 'quote', kind: 'paragraph', text: structured }]);
+    });
+
+    it('reads the live-catalog caveat back from a live-fallback result', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue({
+        books: [mockBook],
+        totalCount: 1,
+        hasMore: false,
+        page: 1,
+        source: 'live',
+      });
+      const { read, structured } = noticeOf(
+        await runToolContract(gutenbergSearchBooks, {
+          author_year_start: 1800,
+          author_year_end: 1899,
+        }),
+      );
+      expect(structured).toContain('checked separately');
+      expect(read).toEqual([{ container: 'quote', kind: 'paragraph', text: structured }]);
+    });
+
+    it('reads both sentences back when an empty live result carries them together', async () => {
+      mockGutendexService.searchBooks.mockResolvedValue({
+        books: [],
+        totalCount: 0,
+        hasMore: false,
+        page: 1,
+        source: 'live',
+      });
+      const { read, structured } = noticeOf(
+        await runToolContract(gutenbergSearchBooks, {
+          languages: ['eng'],
+          author_year_start: 1800,
+          author_year_end: 1899,
+        }),
+      );
+      expect(structured).toContain('checked separately');
+      expect(structured).toContain('English is "en", not "eng".');
+      expect(read).toEqual([{ container: 'quote', kind: 'paragraph', text: structured }]);
+    });
+  });
+});
 
 describe('gutenbergSearchBooks — catalog_unavailable', () => {
   /**

@@ -6,9 +6,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 import { normalizeSearchParams } from '@/services/gutendex/types.js';
-import { discoveryCriteria, discoveryFilters } from '../discovery-criteria.js';
+import {
+  discoveryCriteria,
+  discoveryFilters,
+  withLanguageCodeHint,
+} from '../discovery-criteria.js';
 
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   title: 'Browse Popular Gutenberg Books',
@@ -20,10 +25,10 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     mime_type: discoveryFilters.mime_type,
     copyright: discoveryFilters.copyright,
     languages: z
-      .array(z.string().min(2).max(2))
+      .array(z.string().min(2).max(3))
       .optional()
       .describe(
-        'Restrict to books in these languages (two-character ISO 639-1 codes). Example: ["en"] for English only, ["de", "fr"] for German or French. Omit for all languages.',
+        'Restrict to books in these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English only, ["de", "fr"] for German or French, ["ang"] for Old English. Omit for all languages.',
       ),
     topic: z
       .string()
@@ -122,11 +127,20 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
 
   /** Render criteria and executable continuation alongside the cap disclosure. */
   enrichmentTrailer: {
-    effectiveCriteria: { render: (value) => `Browse criteria: ${JSON.stringify(value)}` },
+    effectiveCriteria: {
+      render: (value) =>
+        markdown().text('Browse criteria: ').inlineCode(JSON.stringify(value)).build(),
+    },
     continuation: {
       render: (value) =>
         value
-          ? `Continue with ${value.tool} ${JSON.stringify(value.arguments)}. Page 1 repeats the first page when the browse cap leaves unseen books on it.`
+          ? markdown()
+              .text(`Continue with ${value.tool} `)
+              .inlineCode(JSON.stringify(value.arguments))
+              .text(
+                '. Page 1 repeats the first page when the browse cap leaves unseen books on it.',
+              )
+              .build()
           : '',
     },
     truncated: {
@@ -188,7 +202,10 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
 
     if (result.books.length === 0) {
       ctx.enrich.notice(
-        'No books matched these criteria. Try a broader topic or remove a language, format, or copyright filter.',
+        withLanguageCodeHint(
+          'No books matched these criteria. Try a broader topic or remove a language, format, or copyright filter.',
+          criteria.languages,
+        ),
       );
     }
 
@@ -257,13 +274,13 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
                   a.birth_year != null || a.death_year != null
                     ? ` (${a.birth_year ?? '?'}–${a.death_year ?? '?'})`
                     : '';
-                return `${a.name}${years}`;
+                return `${escapeMarkdownInline(a.name)}${years}`;
               })
               .join(', ')
           : 'Unknown';
-      lines.push(`${idx + 1}. **[${book.id}]** ${book.title} — ${authorStr}`);
+      lines.push(`${idx + 1}. **[${book.id}]** ${escapeMarkdownInline(book.title)} — ${authorStr}`);
       lines.push(
-        `   Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
+        `   Lang: ${book.languages.map(escapeMarkdownInline).join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
       );
     });
 

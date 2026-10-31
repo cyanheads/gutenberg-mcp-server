@@ -7,9 +7,9 @@ import { z } from '@cyanheads/mcp-ts-core';
 /** Filters shared by search, browse, criteria echo and continuation arguments. */
 export const discoveryFilters = {
   languages: z
-    .array(z.string().min(2).max(2))
+    .array(z.string().min(2).max(3))
     .optional()
-    .describe('Any listed two-character ISO 639-1 language code; empty means all languages.'),
+    .describe('Any listed two- or three-letter catalog language code; empty means all languages.'),
   topic: z
     .string()
     .optional()
@@ -37,6 +37,12 @@ export const discoveryCriteria = z.object({
     .describe(
       'Every nonblank word must occur in the title or an author name, case-insensitively, as a literal substring. More than four words require the local mirror; live fallback rejects longer queries. Whitespace separates words.',
     ),
+  translator: z
+    .string()
+    .optional()
+    .describe(
+      'Every nonblank word must occur in a translator name, case-insensitively, as a literal substring. Requires the local mirror. Whitespace separates words.',
+    ),
   ids: z
     .array(z.number().int().positive())
     .optional()
@@ -48,14 +54,14 @@ export const discoveryCriteria = z.object({
     .int()
     .optional()
     .describe(
-      'At least one author has a birth or death year on or after this year (CE positive, BCE negative).',
+      'An author has a known birth or death year on or after this year (CE positive, BCE negative). With author_year_end, one author must meet both bounds.',
     ),
   author_year_end: z
     .number()
     .int()
     .optional()
     .describe(
-      'At least one author has a birth or death year on or before this year (CE positive, BCE negative).',
+      'An author has a known birth or death year on or before this year (CE positive, BCE negative). With author_year_start, one author must meet both bounds.',
     ),
   sort: z
     .enum(['popular', 'ascending', 'descending'])
@@ -70,3 +76,13 @@ export const discoveryCriteria = z.object({
     .default(1)
     .describe('One-indexed page of at most 32 matches. Pages beyond the result range are errors.'),
 });
+
+/**
+ * Extend an empty result's notice when a three-letter code was filtered on: the catalog
+ * stores English as `en`, so `eng` and its kind succeed with nothing rather than failing.
+ */
+export function withLanguageCodeHint(notice: string, languages: string[] | undefined): string {
+  return languages?.some((code) => code.length === 3)
+    ? `${notice} Language codes match exactly: English is "en", not "eng".`
+    : notice;
+}

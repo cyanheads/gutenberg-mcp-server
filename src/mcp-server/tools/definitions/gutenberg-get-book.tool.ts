@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
 /**
@@ -22,7 +23,7 @@ function renderPeople(
         p.birth_year != null || p.death_year != null
           ? ` (${p.birth_year ?? '?'}–${p.death_year ?? '?'})`
           : '';
-      return `${p.name}${years}`;
+      return `${escapeMarkdownInline(p.name)}${years}`;
     })
     .join(', ');
 }
@@ -88,7 +89,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       .describe(
         'Project Gutenberg bookshelf categories (e.g., "Best Books Ever Listings", "Category: Classics of Literature").',
       ),
-    languages: z.array(z.string()).describe('Two-character language codes for this edition.'),
+    languages: z.array(z.string()).describe('Catalog language codes for this edition.'),
     copyright: z
       .boolean()
       .nullable()
@@ -199,9 +200,9 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
   format: (result) => {
     const lines: string[] = [];
 
-    lines.push(`# ${result.title}`);
+    lines.push(`# ${escapeMarkdownInline(result.title)}`);
     lines.push(
-      `**ID:** ${result.id} | **Media:** ${result.media_type} | **Downloads in the last 30 days (source snapshot):** ${result.download_count.toLocaleString()}`,
+      `**ID:** ${result.id} | **Media:** ${escapeMarkdownInline(result.media_type)} | **Downloads in the last 30 days (source snapshot):** ${result.download_count.toLocaleString()}`,
     );
 
     lines.push(`**Authors:** ${renderPeople(result.authors)}`);
@@ -209,19 +210,30 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     lines.push(`**Editors:** ${renderPeople(result.editors)}`);
 
     lines.push(
-      `**Languages:** ${result.languages.join(', ')} | **Copyright:** ${result.copyright === false ? 'Public Domain (USA)' : result.copyright === true ? 'Under Copyright' : 'Unknown'}`,
+      `**Languages:** ${result.languages.map(escapeMarkdownInline).join(', ')} | **Copyright:** ${result.copyright === false ? 'Public Domain (USA)' : result.copyright === true ? 'Under Copyright' : 'Unknown'}`,
     );
 
-    lines.push(`**Subjects:** ${result.subjects.length > 0 ? result.subjects.join('; ') : 'None'}`);
     lines.push(
-      `**Bookshelves:** ${result.bookshelves.length > 0 ? result.bookshelves.join('; ') : 'None'}`,
+      `**Subjects:** ${result.subjects.length > 0 ? escapeMarkdownInline(result.subjects.join('; ')) : 'None'}`,
+    );
+    lines.push(
+      `**Bookshelves:** ${result.bookshelves.length > 0 ? escapeMarkdownInline(result.bookshelves.join('; ')) : 'None'}`,
     );
 
     lines.push('');
-    lines.push(`**Summary:** ${result.summary ?? 'Not available'}`);
     lines.push(
-      `**Source notes:** ${result.source_notes === null ? 'Not available' : result.source_notes.length === 0 ? 'None' : result.source_notes.join('\n')}`,
+      `**Summary:** ${result.summary === null ? 'Not available' : escapeMarkdownInline(result.summary)}`,
     );
+    /**
+     * A fence rather than an escape: most notes hold a URL an agent may copy, and
+     * escaping would put a backslash inside it on thousands of books.
+     */
+    if (result.source_notes?.length) {
+      lines.push('**Source notes:**');
+      lines.push(markdown().codeBlock(result.source_notes.join('\n'), 'text').build());
+    } else {
+      lines.push(`**Source notes:** ${result.source_notes ? 'None' : 'Not available'}`);
+    }
 
     /**
      * `summary` is already the first entry of `summaries`; repeating it would
@@ -233,7 +245,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     if (additionalSummaries.length > 0) {
       lines.push(`**Additional summaries (${additionalSummaries.length}):**`);
       for (const [idx, summary] of additionalSummaries.entries()) {
-        lines.push(`  ${idx + 1}. ${summary}`);
+        lines.push(`  ${idx + 1}. ${escapeMarkdownInline(summary)}`);
       }
     } else {
       lines.push('**Additional summaries:** None');
@@ -245,9 +257,14 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     );
 
     lines.push('');
-    lines.push('**Formats:**');
-    for (const [mime, url] of Object.entries(result.formats)) {
-      lines.push(`  - \`${mime}\`: ${url}`);
+    const formats = Object.entries(result.formats);
+    if (formats.length > 0) {
+      lines.push('**Formats:**');
+      for (const [mime, url] of formats) {
+        lines.push(`  - ${markdownLink(mime, url)}`);
+      }
+    } else {
+      lines.push('**Formats:** None');
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
