@@ -81,6 +81,8 @@ export interface SearchParams {
   query?: string | undefined;
   sort?: 'popular' | 'ascending' | 'descending' | undefined;
   topic?: string | undefined;
+  /** Mirror-only: Gutendex has no translator parameter. */
+  translator?: string | undefined;
 }
 
 /** Fold catalog text without letting Greek final sigma depend on substring boundaries. */
@@ -88,16 +90,28 @@ export function foldSearchText(value: string): string {
   return value.toLowerCase().replaceAll('ς', 'σ');
 }
 
+/** Strip NULs and collapse whitespace between words; a value with no words is unset. */
+function normalizeWords(value: string | undefined): string | undefined {
+  return value?.replaceAll('\0', '').split(/\s+/u).filter(Boolean).join(' ') || undefined;
+}
+
+/**
+ * A language code in lowercase. `İ` lowercases to two units, which can outgrow the
+ * echoed criteria's length cap, so such a code stays as sent and matches nothing.
+ */
+function lowercaseCode(code: string): string {
+  const lower = code.toLowerCase();
+  return lower.length === code.length ? lower : code;
+}
+
 /** Normalize form blanks and query whitespace before either catalog source sees them. */
 export function normalizeSearchParams(params: SearchParams): SearchParams {
-  const query = params.query?.replaceAll('\0', '').split(/\s+/u).filter(Boolean).join(' ');
   return {
     ...params,
-    query: query || undefined,
+    query: normalizeWords(params.query),
+    translator: normalizeWords(params.translator),
     topic: params.topic?.trim() || undefined,
-    languages: params.languages?.length
-      ? params.languages.map((code) => code.toLowerCase())
-      : undefined,
+    languages: params.languages?.length ? params.languages.map(lowercaseCode) : undefined,
     mime_type: params.mime_type?.trim() || undefined,
     copyright: params.copyright?.length ? params.copyright : undefined,
     sort: params.sort ?? 'popular',

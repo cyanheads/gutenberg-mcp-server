@@ -181,6 +181,7 @@ describe('GutendexService — catalog ladder', () => {
     expect(result.totalCount).toBe(1);
     expect(result.books[0]?.id).toBe(1342);
     expect(result.books[0]?.has_plain_text).toBe(true);
+    expect(result.source).toBe('live');
     expect(http.calls).toHaveLength(1);
   });
 
@@ -208,7 +209,7 @@ describe('GutendexService — catalog ladder', () => {
       { ids: [], query: 'one two three four five', page: 99 },
       createMockContext(),
     );
-    expect(result).toEqual({ books: [], totalCount: 0, hasMore: false, page: 99 });
+    expect(result).toEqual({ books: [], totalCount: 0, hasMore: false, page: 99, source: 'none' });
     expect(http.calls).toHaveLength(0);
   });
 
@@ -220,6 +221,46 @@ describe('GutendexService — catalog ladder', () => {
     await expect(
       makeService().searchBooks({ query: 'dickens a tale of two' }, createMockContext()),
     ).rejects.toMatchObject({ data: { reason: 'query_requires_mirror' } });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('rejects a translator filter before catalog I/O and ahead of the long-query check', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+    });
+    const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+    for (const params of [
+      { translator: 'maude' },
+      { translator: 'maude', query: 'dickens a tale of two' },
+    ]) {
+      await expect(makeService().searchBooks(params, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'translator_requires_mirror',
+          recovery: { hint: expect.stringContaining('gutenberg_get_book') },
+        },
+      });
+    }
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('treats a blank translator as unset on the live path', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () => Response.json({ count: 1, next: null, previous: null, results: [rawBook] }),
+    });
+    await makeService().searchBooks({ translator: '   ' }, createMockContext());
+    expect(http.calls).toHaveLength(1);
+    expect(new URL(http.calls[0]!.request.url).searchParams.has('translator')).toBe(false);
+  });
+
+  it('answers an empty selection ahead of a translator filter', async () => {
+    const result = await makeService().searchBooks(
+      { ids: [], translator: 'maude' },
+      createMockContext(),
+    );
+    expect(result).toMatchObject({ books: [], totalCount: 0, source: 'none' });
     expect(http.calls).toHaveLength(0);
   });
 

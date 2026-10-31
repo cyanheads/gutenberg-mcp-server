@@ -9,8 +9,9 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
+import { type SyncState, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { describe, expect, it } from 'vitest';
+import { CatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
 import {
   bookFromRow,
   CATALOG_FTS_COLUMNS,
@@ -104,6 +105,201 @@ describe('catalogStoreSpec', () => {
       await upgraded.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('schema v4 translator backfill', () => {
+    /** One past the migration's 500-row batch, so the backfill takes a second read. */
+    const TRANSLATED_ROWS = 501;
+    const UNTRANSLATED_ROWS = 3;
+    const TOTAL_ROWS = TRANSLATED_ROWS + UNTRANSLATED_ROWS;
+    const scratch = (name: string) =>
+      mkdtempSync(join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), name));
+
+    const record: Book = {
+      ...parse(84),
+      subjects: [],
+      bookshelves: [],
+      summaries: [],
+      formats: {},
+    };
+
+    /** A stored row as schema v3 wrote it, with no folded translator column. */
+    function v3Row(id: number, translators: Book['translators'], title = `Book ${id}`) {
+      const row = rowFromBook({ ...record, id, title, translators });
+      delete row.translators_folded;
+      return row;
+    }
+
+    /** A store at schema v3: declared without the column, with no migration pending. */
+    function v3Store(path: string) {
+      const spec = catalogStoreSpec(path);
+      delete spec.columns.translators_folded;
+      return sqliteMirrorStore({ ...spec, version: 3, migrations: [] });
+    }
+
+    const columnNames = async (store: ReturnType<typeof sqliteMirrorStore>) =>
+      (await store.raw())
+        .prepare<{ name: string }>('PRAGMA table_info(books)')
+        .all()
+        .map((column) => column.name);
+
+    const updateTrigger = async (store: ReturnType<typeof sqliteMirrorStore>) =>
+      (await store.raw())
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name='books_au'")
+        .all();
+
+    async function writeV3(path: string, state: SyncState) {
+      const v3 = v3Store(path);
+      try {
+        expect(await columnNames(v3)).not.toContain('translators_folded');
+        await v3.applyBatch(
+          [
+            ...Array.from({ length: TRANSLATED_ROWS }, (_, i) =>
+              v3Row(i + 1, [
+                { name: 'GRENIER, Édouard', birth_year: 1819, death_year: 1901 },
+                { name: 'Maude, Louise', birth_year: 1855, death_year: 1939 },
+              ]),
+            ),
+            ...Array.from({ length: UNTRANSLATED_ROWS }, (_, i) =>
+              v3Row(TRANSLATED_ROWS + i + 1, []),
+            ),
+          ],
+          [],
+        );
+        await v3.writeState(state);
+        return await v3.readState();
+      } finally {
+        await v3.close();
+      }
+    }
+
+    it.each([
+      [
+        'a complete mirror',
+        {
+          status: 'complete',
+          completedAt: '2026-10-01T00:00:00.000Z',
+          checkpoint: '2026-09-30T14:35:59.000Z',
+          total: TOTAL_ROWS,
+        },
+        true,
+      ],
+      [
+        'an interrupted harvest',
+        { status: 'error', cursor: 'stamp|4000', checkpoint: 'earlier stamp', total: TOTAL_ROWS },
+        false,
+      ],
+    ] as const)(
+      'upgrades %s without a harvest, keeping its sync state and readiness',
+      async (_name, state, ready) => {
+        const dir = scratch('gutenberg-translator-backfill-');
+        const path = join(dir, 'v3.sqlite');
+        const before = await writeV3(path, state);
+        const service = new CatalogMirrorService({
+          gutendexBaseUrl: 'https://catalog.test/books/',
+          gutenbergTextBaseUrl: 'https://mirror.test',
+          mirrorPath: path,
+        });
+        try {
+          expect(await service.ready()).toBe(ready);
+          const { store } = service.mirror;
+          const db = await service.mirror.raw();
+          expect(
+            db
+              .prepare<{ rows: number; folded: number }>(
+                'SELECT count(*) AS rows, count(translators_folded) AS folded FROM books',
+              )
+              .get(),
+          ).toEqual({ rows: TOTAL_ROWS, folded: TRANSLATED_ROWS });
+          expect(
+            db
+              .prepare<{ translators_folded: string }>(
+                'SELECT DISTINCT translators_folded FROM books WHERE translators_folded IS NOT NULL',
+              )
+              .all(),
+          ).toEqual([{ translators_folded: '["grenier, édouard","maude, louise"]' }]);
+          expect(await store.readState()).toEqual(before);
+          expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 4 }]);
+          expect((await store.integrityCheck()).ok).toBe(true);
+
+          for (const translator of ['ÉDOUARD', 'louise grenier']) {
+            const found = await service.searchBooks({ translator });
+            expect(found.total).toBe(TRANSLATED_ROWS);
+            expect(found.books[0]?.translators).toHaveLength(2);
+          }
+          expect(
+            (await service.searchBooks({ translator: 'maude', ids: [TOTAL_ROWS] })).total,
+          ).toBe(0);
+
+          /** The suspended FTS trigger is back: a later write reaches the index. */
+          expect(await updateTrigger(store)).toHaveLength(1);
+          expect((await store.query({ match: 'Book', limit: 1, offset: 0 })).total).toBe(
+            TOTAL_ROWS,
+          );
+          await store.applyBatch(
+            [
+              rowFromBook({
+                ...parse(84),
+                id: 1,
+                title: 'Renamed Ωμέγα',
+                translators: [{ name: 'Nouveau', birth_year: null, death_year: null }],
+              }),
+            ],
+            [],
+          );
+          expect((await store.query({ match: 'Ωμέγα', limit: 1, offset: 0 })).total).toBe(1);
+          expect((await service.searchBooks({ translator: 'nouveau' })).total).toBe(1);
+        } finally {
+          await service.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('rolls the column back and restores the FTS trigger when the backfill fails', async () => {
+      const dir = scratch('gutenberg-translator-rollback-');
+      const path = join(dir, 'v3.sqlite');
+      const v3 = v3Store(path);
+      await v3.applyBatch(
+        [
+          v3Row(1, [{ name: 'Good', birth_year: null, death_year: null }]),
+          { ...v3Row(2, []), translators: 'not-json' },
+        ],
+        [],
+      );
+      await v3.close();
+      const failing = sqliteMirrorStore(catalogStoreSpec(path));
+      await expect(failing.raw()).rejects.toThrow();
+      await failing.close();
+      const recovered = v3Store(path);
+      try {
+        expect(await columnNames(recovered)).not.toContain('translators_folded');
+        expect(await updateTrigger(recovered)).toHaveLength(1);
+        expect(await recovered.count()).toBe(2);
+        await recovered.applyBatch([v3Row(1, [], 'Renamed')], []);
+        expect((await recovered.query({ match: 'renamed', limit: 1, offset: 0 })).total).toBe(1);
+      } finally {
+        await recovered.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('creates the column on a fresh database, which needs no backfill', async () => {
+      const dir = scratch('gutenberg-translator-fresh-');
+      const store = sqliteMirrorStore(catalogStoreSpec(join(dir, 'fresh.sqlite')));
+      try {
+        expect(await columnNames(store)).toContain('translators_folded');
+        const db = await store.raw();
+        expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 4 }]);
+        expect(await updateTrigger(store)).toHaveLength(1);
+        await store.applyBatch([rowFromBook(parse(1399))], []);
+        const { rows } = await store.query({ limit: 1, offset: 0 });
+        expect(rows[0]?.translators_folded).toBe('["garnett, constance"]');
+      } finally {
+        await store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it('rolls back derived columns and restores FTS triggers when a backfill fails', async () => {
@@ -250,6 +446,20 @@ describe('rowFromBook / bookFromRow', () => {
     expect(row.authors_text).toBe('Confucius\nFaxian\nMencius');
     expect(row.subjects_text.split('\n')).toEqual(parse(10056).subjects);
     expect(row.languages_text).toBe('en');
+  });
+
+  it('folds translator names for the filter, and stores an empty list for none', () => {
+    expect(rowFromBook(parse(1399)).translators_folded).toBe('["garnett, constance"]');
+    expect(rowFromBook(parse(84)).translators_folded).toBe('[]');
+    const book = {
+      ...parse(84),
+      translators: [
+        { name: 'Grenier, Édouard', birth_year: 1819, death_year: 1901 },
+        { name: 'ΟΣΑΣ', birth_year: null, death_year: null },
+      ],
+    };
+    expect(rowFromBook(book).translators_folded).toBe('["grenier, édouard","οσασ"]');
+    expect(bookFromRow(rowFromBook(book))).toEqual(book);
   });
 
   it('reduces author lifespans to the range the year filters compare against', () => {

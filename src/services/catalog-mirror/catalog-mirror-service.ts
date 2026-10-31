@@ -190,6 +190,12 @@ export class CatalogMirrorService {
       );
       values.push(JSON.stringify([...new Set(foldSearchText(params.query).split(' '))]));
     }
+    if (params.translator) {
+      predicates.push(
+        'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE NOT EXISTS (SELECT 1 FROM json_each(translators_folded) AS translator WHERE instr(translator.value, term.value) > 0))',
+      );
+      values.push(JSON.stringify([...new Set(foldSearchText(params.translator).split(' '))]));
+    }
     if (params.topic) {
       predicates.push(
         '(EXISTS (SELECT 1 FROM json_each(subjects_folded) WHERE instr(value, ?) > 0) OR EXISTS (SELECT 1 FROM json_each(bookshelves_folded) WHERE instr(value, ?) > 0))',
@@ -213,6 +219,18 @@ export class CatalogMirrorService {
     if (params.author_year_end !== undefined) {
       predicates.push('(author_birth_min <= ? OR author_death_min <= ?)');
       values.push(params.author_year_end, params.author_year_end);
+    }
+    if (params.author_year_start !== undefined && params.author_year_end !== undefined) {
+      /** The stored extremes span a book's authors, so two authors can satisfy them together. */
+      predicates.push(
+        "EXISTS (SELECT 1 FROM json_each(authors) AS author WHERE (author.value ->> 'birth_year' >= ? OR author.value ->> 'death_year' >= ?) AND (author.value ->> 'birth_year' <= ? OR author.value ->> 'death_year' <= ?))",
+      );
+      values.push(
+        params.author_year_start,
+        params.author_year_start,
+        params.author_year_end,
+        params.author_year_end,
+      );
     }
     if (params.mime_type) {
       predicates.push(

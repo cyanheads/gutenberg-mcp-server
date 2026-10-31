@@ -20,6 +20,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
+import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
 import {
   type CatalogMirrorService,
   initCatalogMirrorService,
@@ -33,6 +34,8 @@ const CATALOG_BASE = 'https://catalog.test/books/';
 const MIRRORED_ID = 45304;
 /** Absent from the sample archive — the staleness case. */
 const UNMIRRORED_ID = 1342;
+/** The sample archive's translated record: Anna Karenina, translated by Constance Garnett. */
+const TRANSLATED_ID = 1399;
 
 let archive: ArchiveServer;
 let workDir: string;
@@ -105,5 +108,29 @@ describe('GutendexService.getBook — catalog mirror read path', () => {
 
     expect(book.title).toBe('Pride and Prejudice');
     expect(http.calls).toHaveLength(1);
+  });
+});
+
+describe('GutendexService.searchBooks — harvested translators', () => {
+  it('finds a translator the harvest ingested, without calling the live catalog', async () => {
+    const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+
+    const found = await makeGutendex().searchBooks({ translator: 'CONSTANCE garnett' }, ctx);
+
+    expect(found.books.map((book) => book.id)).toEqual([TRANSLATED_ID]);
+    expect(found).toMatchObject({ totalCount: 1, source: 'mirror' });
+    expect(found.books[0]?.translators.map((person) => person.name)).toEqual([
+      'Garnett, Constance',
+    ]);
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('matches no translator on the sample records that list none', async () => {
+    const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+
+    const missed = await makeGutendex().searchBooks({ translator: 'shelley' }, ctx);
+
+    expect(missed).toMatchObject({ books: [], totalCount: 0, source: 'mirror' });
+    expect(http.calls).toHaveLength(0);
   });
 });

@@ -71,6 +71,10 @@ export interface CatalogBookRow extends MirrorRow {
   summaries: string;
   title: string;
   title_folded: string;
+  /** JSON `Person[]`. */
+  translators: string;
+  /** JSON folded names; `[]` or, on a row the v4 backfill skipped, null: neither matches. */
+  translators_folded?: string | null;
 }
 
 /**
@@ -78,15 +82,16 @@ export interface CatalogBookRow extends MirrorRow {
  *
  * The `download_count` index backs `gutenberg_browse_popular` and the default
  * `sort: 'popular'` ordering, which are the only ordered scans over the whole table.
- * The four `author_*` columns collapse Gutendex's author-lifespan filter — which is an
- * OR over every author of a book — into scalar comparisons a single row can answer.
+ * The four `author_*` columns collapse one author-lifespan bound — an OR over every
+ * author of a book — into scalar comparisons a single row can answer. Two bounds need
+ * one author to meet both, so `searchBooks` also reads `authors` for that case.
  */
 export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
   return {
     path,
     table: CATALOG_TABLE,
     primaryKey: 'id',
-    version: 3,
+    version: 4,
     migrations: [
       {
         version: 2,
@@ -150,6 +155,39 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
           db.exec(updateTrigger);
         },
       },
+      {
+        version: 4,
+        up(db) {
+          /**
+           * Same FTS suspension as v3. A null column matches no translator filter, so
+           * only rows that list a translator are written, and the harvest fills `[]`
+           * on the rest as it rewrites them.
+           */
+          const { sql: updateTrigger } = db
+            .prepare<{ sql: string }>(
+              "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='books_au'",
+            )
+            .get() as { sql: string };
+          db.exec('DROP TRIGGER books_au');
+          const columns = db.prepare<{ name: string }>('PRAGMA table_info(books)').all();
+          if (!columns.some((column) => column.name === 'translators_folded'))
+            db.exec('ALTER TABLE books ADD COLUMN translators_folded TEXT');
+          const read = db.prepare<Pick<CatalogBookRow, 'id' | 'translators'>>(
+            "SELECT id, translators FROM books WHERE id > ? AND translators <> '[]' ORDER BY id LIMIT 500",
+          );
+          const write = db.prepare('UPDATE books SET translators_folded=? WHERE id=?');
+          let after = 0;
+          for (;;) {
+            const rows = read.all(after);
+            if (rows.length === 0) break;
+            for (const row of rows) {
+              write.run(foldedNames(JSON.parse(row.translators) as Person[]), row.id);
+              after = row.id;
+            }
+          }
+          db.exec(updateTrigger);
+        },
+      },
     ],
     columns: {
       id: 'INTEGER',
@@ -158,6 +196,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
       authors_folded: 'TEXT',
       subjects_folded: 'TEXT',
       bookshelves_folded: 'TEXT',
+      translators_folded: 'TEXT',
       authors: 'TEXT NOT NULL',
       translators: 'TEXT NOT NULL',
       editors: 'TEXT NOT NULL',
@@ -185,11 +224,16 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
   };
 }
 
+/** A people list's folded names, as JSON. */
+function foldedNames(people: Person[]): string {
+  return JSON.stringify(people.map((person) => foldSearchText(person.name)));
+}
+
 /** Unicode case conversion is done at ingest, since SQLite LOWER only folds ASCII. */
 function foldedFields(title: string, authors: Person[], subjects: string[], bookshelves: string[]) {
   return {
     title_folded: foldSearchText(title),
-    authors_folded: JSON.stringify(authors.map((person) => foldSearchText(person.name))),
+    authors_folded: foldedNames(authors),
     subjects_folded: JSON.stringify(subjects.map(foldSearchText)),
     bookshelves_folded: JSON.stringify(bookshelves.map(foldSearchText)),
   };
@@ -213,6 +257,7 @@ export function rowFromBook(book: Book): CatalogBookRow {
   const death = lifespanRange(book.authors, 'death_year');
   return {
     ...foldedFields(book.title, book.authors, book.subjects, book.bookshelves),
+    translators_folded: foldedNames(book.translators),
     id: book.id,
     title: book.title,
     authors: JSON.stringify(book.authors),

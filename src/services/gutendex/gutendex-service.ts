@@ -203,16 +203,26 @@ export class GutendexService {
     return page;
   }
 
-  /** Search books by the given parameters. Returns normalized books + count + pagination. */
+  /**
+   * Search books by the given parameters. Returns normalized books + count + pagination,
+   * plus the `source` that answered: the local mirror, the live catalog, or `none` for an
+   * empty ID selection that reached neither.
+   */
   async searchBooks(
     params: SearchParams,
     ctx: Context,
-  ): Promise<{ books: Book[]; totalCount: number; hasMore: boolean; page: number }> {
+  ): Promise<{
+    books: Book[];
+    totalCount: number;
+    hasMore: boolean;
+    page: number;
+    source: 'mirror' | 'live' | 'none';
+  }> {
     ctx.signal.throwIfAborted();
     params = normalizeSearchParams(params);
     const pageNumber = params.page ?? 1;
     if (params.ids?.length === 0)
-      return { books: [], totalCount: 0, hasMore: false, page: pageNumber };
+      return { books: [], totalCount: 0, hasMore: false, page: pageNumber, source: 'none' };
     const mirrored = await this.mirrorSearch(params, ctx);
     ctx.signal.throwIfAborted();
     if (mirrored !== null) {
@@ -226,7 +236,14 @@ export class GutendexService {
         totalCount: mirrored.total,
         hasMore: pageNumber * 32 < mirrored.total,
         page: pageNumber,
+        source: 'mirror',
       };
+    }
+    if (params.translator) {
+      throw validationError('The translator filter requires the local catalog mirror.', {
+        reason: 'translator_requires_mirror',
+        ...ctx.recoveryFor('translator_requires_mirror'),
+      });
     }
     if ((params.query?.split(' ').length ?? 0) > 4) {
       throw validationError('More than four query words require the local catalog mirror.', {
@@ -241,6 +258,7 @@ export class GutendexService {
       totalCount: page.count,
       hasMore: page.next !== null,
       page: params.page ?? 1,
+      source: 'live',
     };
   }
 

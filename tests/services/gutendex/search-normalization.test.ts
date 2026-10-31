@@ -28,6 +28,27 @@ describe('normalizeSearchParams', () => {
     });
   });
 
+  it('normalizes translator as it does query, leaving case for the fold and blanks unset', () => {
+    const raw = ' \t Mau\0de\n  ÉDOUARD\r\n ';
+    expect(normalizeSearchParams({ translator: raw, query: raw })).toMatchObject({
+      translator: 'Maude ÉDOUARD',
+      query: 'Maude ÉDOUARD',
+    });
+    for (const translator of ['', '   ', '\0 \n']) {
+      expect(normalizeSearchParams({ translator }).translator).toBeUndefined();
+    }
+    expect(normalizeSearchParams({}).translator).toBeUndefined();
+  });
+
+  it('lowercases language codes unless that would lengthen them', () => {
+    expect(normalizeSearchParams({ languages: ['EN', 'Enm', 'İİ', 'Éa'] }).languages).toEqual([
+      'en',
+      'enm',
+      'İİ',
+      'éa',
+    ]);
+  });
+
   it.each(['<', '<p', 'a\r\n\t', '\0 \n', '%_'])(
     'bounds normalization CPU over a 64× span of %j',
     (prefix) => {
