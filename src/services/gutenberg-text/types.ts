@@ -24,6 +24,15 @@ export interface CachedText {
   title: string;
 }
 
+/** First occurrence of a passage, in the same coordinates as `offset` and `totalChars`. */
+export interface PassageMatch {
+  /** Non-overlapping occurrences after this one. */
+  laterMatches: number;
+  /** Matched span in the stored text; differs from the search text across whitespace runs. */
+  length: number;
+  offset: number;
+}
+
 /** Result of chunking a cached text. */
 export interface TextChunk {
   hasMore: boolean;

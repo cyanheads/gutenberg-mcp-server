@@ -1,8 +1,8 @@
 /**
  * @fileoverview Service for fetching and processing plain-text book files from
  * Project Gutenberg. Handles BOM stripping, boilerplate extraction via START/END
- * markers, CRLF normalization, HTML fallback, offset/limit chunking, and a 24-hour
- * in-process text cache keyed by Gutenberg ID.
+ * markers, CRLF normalization, HTML fallback, offset/limit chunking, passage search
+ * over the stored text, and a 24-hour tenant-scoped text cache keyed by Gutenberg ID.
  * @module services/gutenberg-text/gutenberg-text-service
  */
 
@@ -13,9 +13,9 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { SAXParser } from 'parse5-sax-parser';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { Book } from '@/services/gutendex/types.js';
+import { type Book, foldSearchText } from '@/services/gutendex/types.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
-import type { CachedText, FetchedText, SourceFormat, TextChunk } from './types.js';
+import type { CachedText, FetchedText, PassageMatch, SourceFormat, TextChunk } from './types.js';
 
 /**
  * Per-attempt ceiling for one mirror file request. Books are whole files —
@@ -62,6 +62,19 @@ function normalizeWhitespace(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
 }
 
+/**
+ * Empty every `\n`-delimited line holding no visible character. Converted HTML
+ * alone needs this: indentation nodes, `&nbsp;` spacers, and empty cells leave
+ * such lines, while a plain-text edition's are its own and keep their offsets.
+ * Splitting rather than a multiline regex keeps U+2028 from delimiting a line.
+ */
+function blankWhitespaceLines(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => (/\S/.test(line) ? line : ''))
+    .join('\n');
+}
+
 /** Block boundaries in the literary stream; inline markup leaves prose intact. */
 const BLOCK_TAGS = new Set([
   'p',
@@ -79,13 +92,28 @@ const BLOCK_TAGS = new Set([
   'pre',
 ]);
 
-/** Tokenize HTML once: references decode once, independently of presentation. */
+/** End tags that leave a cell, explicitly or by closing what holds it. */
+const CELL_END_TAGS = new Set(['td', 'th', 'tr', 'caption']);
+
+/**
+ * Tokenize HTML once: references decode once, independently of presentation.
+ * Whitespace-only text between table, row, and cell tags is source layout: left
+ * in, it breaks a row across lines. `cellOpen` holds one flag per open table,
+ * innermost last, so a nested table's cells never end the cell that holds it;
+ * `outerRowCells` sets aside the row count a nested table interrupts.
+ * A tokenizer sees no implied end tags, so a row or the table closes a cell too.
+ */
 function htmlToText(html: string): string {
   const chunks: string[] = [];
   const parser = new SAXParser();
   let excluded: string | undefined;
   let templateDepth = 0;
   let cellsInRow = 0;
+  const outerRowCells: number[] = [];
+  const cellOpen: boolean[] = [];
+  const setCellOpen = (open: boolean) => {
+    if (cellOpen.length > 0) cellOpen[cellOpen.length - 1] = open;
+  };
   const rowBoundary = () => {
     if (!chunks.at(-1)?.endsWith('\n')) chunks.push('\n');
   };
@@ -102,10 +130,19 @@ function htmlToText(html: string): string {
       chunks.push('\n\n');
     } else if (tagName === 'tr' || tagName === 'table') {
       rowBoundary();
+      if (tagName === 'table') {
+        outerRowCells.push(cellsInRow);
+        cellOpen.push(false);
+      } else {
+        setCellOpen(false);
+      }
       cellsInRow = 0;
     } else if (tagName === 'td' || tagName === 'th') {
       if (cellsInRow > 0) chunks.push('\t');
       cellsInRow += 1;
+      setCellOpen(true);
+    } else if (tagName === 'caption') {
+      setCellOpen(true);
     }
   });
   parser.on('endTag', ({ tagName }) => {
@@ -119,12 +156,44 @@ function htmlToText(html: string): string {
     }
     if (tagName === 'tr' || tagName === 'table') rowBoundary();
     else if (BLOCK_TAGS.has(tagName)) chunks.push('\n\n');
+    if (tagName === 'table') {
+      cellOpen.pop();
+      cellsInRow = outerRowCells.pop() ?? 0;
+    } else if (CELL_END_TAGS.has(tagName)) {
+      setCellOpen(false);
+    }
   });
   parser.on('text', ({ text }) => {
-    if (!excluded && templateDepth === 0) chunks.push(text);
+    if (excluded || templateDepth > 0) return;
+    if (cellOpen.at(-1) === false && !/\S/.test(text)) return;
+    chunks.push(text);
   });
   parser.end(html);
   return chunks.join('');
+}
+
+/** The comparison key every `\s` unit shares; a run of them reads as one. */
+const WHITESPACE_KEY = 0x20;
+
+/** Comparison key per UTF-16 code unit, indexed by unit. Built by the first search. */
+let passageKeys: Uint16Array | undefined;
+
+/**
+ * One key per code unit keeps a match in stored-text offsets, which lowercasing
+ * the whole text cannot: `İ` folds to two units, shifting every later offset. So
+ * a unit whose fold changes length compares as itself.
+ */
+function buildPassageKeys(): Uint16Array {
+  const keys = new Uint16Array(0x10000);
+  for (let unit = 0; unit < keys.length; unit++) {
+    const character = String.fromCharCode(unit);
+    const folded = foldSearchText(character);
+    keys[unit] = folded.length === 1 ? folded.charCodeAt(0) : unit;
+    if (/\s/.test(character)) keys[unit] = WHITESPACE_KEY;
+  }
+  keys[0x2018] = keys[0x2019] = 0x27; // ‘ ’ read as '
+  keys[0x201c] = keys[0x201d] = 0x22; // “ ” read as "
+  return keys;
 }
 
 /**
@@ -305,7 +374,7 @@ export class GutenbergTextService {
 
     // If HTML, convert to plain text first
     if (format === 'text/html') {
-      text = htmlToText(text);
+      text = blankWhitespaceLines(htmlToText(text));
     }
 
     // Normalize CRLF → LF and collapse blank lines
@@ -330,7 +399,7 @@ export class GutenbergTextService {
    * when the mirror ladder exhausts its budget.
    */
   async fetchAndCacheText(book: Book, id: number, ctx: Context): Promise<CachedText> {
-    const cacheKey = `gutenberg/text/v2/${id}`;
+    const cacheKey = `gutenberg/text/v3/${id}`;
 
     const cached = await ctx.state.get<CachedText>(cacheKey);
     if (cached) {
@@ -383,10 +452,76 @@ export class GutenbergTextService {
   }
 
   /**
+   * Locate the first occurrence of `find` at or after `from`, counting the
+   * non-overlapping occurrences after it. `find` carries no surrounding whitespace
+   * and holds at least one other character.
+   *
+   * One KMP pass over per-code-unit keys, so time is linear in text plus `find`
+   * whatever either holds, and `find` needs no length limit. A regex built from
+   * `find` throws on long input, goes super-linear on periodic text under Bun, and
+   * can start a match before `from` inside a surrogate pair. No abort can arrive
+   * while the scan holds the event loop, so the caller checks its signal first.
+   */
+  findPassage({ text }: CachedText, find: string, from: number): PassageMatch | undefined {
+    passageKeys ??= buildPassageKeys();
+    const keys = passageKeys;
+    const keyAt = (source: string, index: number) => keys[source.charCodeAt(index)] as number;
+
+    const pattern = new Uint16Array(find.length);
+    let size = 0;
+    for (let index = 0; index < find.length; index++) {
+      const key = keyAt(find, index);
+      if (key !== WHITESPACE_KEY || pattern[size - 1] !== WHITESPACE_KEY) pattern[size++] = key;
+    }
+
+    /** For each pattern prefix, the longest proper prefix that is also its suffix. */
+    const fallback = new Int32Array(size);
+    for (let index = 1, matched = 0; index < size; index++) {
+      while (matched > 0 && pattern[index] !== pattern[matched]) {
+        matched = fallback[matched - 1] as number;
+      }
+      if (pattern[index] === pattern[matched]) matched += 1;
+      fallback[index] = matched;
+    }
+
+    /** Stored-text start of the last `size` keys, a ring indexed by key count. */
+    const starts = new Int32Array(size);
+    let first: PassageMatch | undefined;
+    let position = from;
+    let keyCount = 0;
+    let matched = 0;
+    while (position < text.length) {
+      const start = position;
+      const key = keyAt(text, position);
+      position += 1;
+      if (key === WHITESPACE_KEY) {
+        while (position < text.length && keyAt(text, position) === WHITESPACE_KEY) position += 1;
+      }
+      starts[keyCount % size] = start;
+      keyCount += 1;
+
+      while (matched > 0 && key !== pattern[matched]) matched = fallback[matched - 1] as number;
+      if (key === pattern[matched]) matched += 1;
+      if (matched === size) {
+        matched = 0;
+        if (first) {
+          first.laterMatches += 1;
+        } else {
+          const offset = starts[(keyCount - size) % size] as number;
+          first = { offset, length: position - offset, laterMatches: 0 };
+        }
+      }
+    }
+    return first;
+  }
+
+  /**
    * Chunk the cached text at the requested offset/limit, with soft paragraph-boundary
    * trimming (backtracks up to 500 chars to the nearest \n\n to avoid mid-paragraph cuts).
+   * A chunk starting at a passage match passes its length: trimming stops at the match
+   * end, while `limit` still applies, so a limit below the length cuts the match short.
    */
-  chunkText(cached: CachedText, offset: number, limit: number): TextChunk {
+  chunkText(cached: CachedText, offset: number, limit: number, matchLength = 0): TextChunk {
     const { text, sourceFormat, title } = cached;
     const totalChars = text.length;
 
@@ -395,7 +530,7 @@ export class GutenbergTextService {
 
     // Soft paragraph-boundary trim: if not at EOF, backtrack to nearest \n\n
     if (end < totalChars) {
-      const searchStart = Math.max(rawEnd - 500, offset + 1);
+      const searchStart = Math.max(rawEnd - 500, offset + Math.max(1, matchLength));
       const slice = text.slice(searchStart, rawEnd);
       const lastBreak = slice.lastIndexOf('\n\n');
       if (lastBreak !== -1) {
