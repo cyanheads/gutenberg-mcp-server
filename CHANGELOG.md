@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-31
+
+Accent-insensitive catalog matching and resilient book reading.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-30
 
 Jump to a passage inside a book with gutenberg_get_text find, filter searches by translator, and filter by language codes like enm and ang. Fixes HTML-edition text, one-author year bounds, and Markdown encoding of content[].
