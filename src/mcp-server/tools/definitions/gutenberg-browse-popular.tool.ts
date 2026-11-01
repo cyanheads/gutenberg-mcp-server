@@ -12,7 +12,8 @@ import { normalizeSearchParams } from '@/services/gutendex/types.js';
 import {
   discoveryCriteria,
   discoveryFilters,
-  withLanguageCodeHint,
+  discoveryNotice,
+  LANGUAGE_CODE_MESSAGE,
 } from '../discovery-criteria.js';
 
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
@@ -25,7 +26,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     mime_type: discoveryFilters.mime_type,
     copyright: discoveryFilters.copyright,
     languages: z
-      .array(z.string().min(2).max(3))
+      .array(z.string().min(2).max(3, LANGUAGE_CODE_MESSAGE))
       .optional()
       .describe(
         'Restrict to books in these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English only, ["de", "fr"] for German or French, ["ang"] for Old English. Omit for all languages.',
@@ -83,7 +84,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
             is_readable: z
               .boolean()
               .describe(
-                'True for non-Sound records with UTF-8 plain text or HTML supported by gutenberg_get_text.',
+                'Eligible Text record with UTF-8 plain text, or HTML without audio formats. Does not guarantee the mirror file exists.',
               ),
           })
           .describe('Book entry.'),
@@ -175,7 +176,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The Project Gutenberg catalog did not answer within the time this server allows for one browse.',
       recovery:
-        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a narrower filter will not help.',
+        'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and a narrower filter will not help.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -200,14 +201,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
 
     const result = await getGutendexService().searchBooks(criteria, ctx);
 
-    if (result.books.length === 0) {
-      ctx.enrich.notice(
-        withLanguageCodeHint(
-          'No books matched these criteria. Try a broader topic or remove a language, format, or copyright filter.',
-          criteria.languages,
-        ),
-      );
-    }
+    const notice = await discoveryNotice(criteria, result, ctx);
 
     const appliedLimit = Math.min(input.limit, 32);
     const limited = result.books.slice(0, appliedLimit);
@@ -227,8 +221,14 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
         shown: limited.length,
         cap: appliedLimit,
         ...(ceiling !== undefined && { ceiling }),
-        guidance:
-          'The catalog holds more matches than shown. Raise limit (max 32) for a longer list, or use gutenberg_search_books to page through all results.',
+        guidance: [
+          notice,
+          appliedLimit < 32
+            ? 'The catalog holds more matches than shown. Raise limit (max 32) for a longer list, or use gutenberg_search_books to page through all results.'
+            : 'The catalog holds more matches than shown. Use the gutenberg_search_books continuation to page through all results.',
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
     } else {
       // `truncated`, `shown`, and `cap` are required enrichment fields, and
@@ -236,6 +236,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       // the complete case has to populate them through the loose call, or the
       // effective-output parse rejects an otherwise-valid response.
       ctx.enrich({ truncated: false, shown: limited.length, cap: appliedLimit });
+      if (notice) ctx.enrich.notice(notice);
     }
 
     return {

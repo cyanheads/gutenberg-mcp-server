@@ -54,16 +54,16 @@ export interface Book {
   /** True when media_type is "Text" and a UTF-8 text/plain format is available. */
   has_plain_text: boolean;
   id: number;
-  /** True for non-Sound records with a supported UTF-8 plain-text or HTML format. */
+  /** Eligible Text record formats; does not guarantee the mirror file exists. */
   is_readable: boolean;
   languages: string[];
   media_type: string;
   /** Direct RDF bibliographic notes; null when the source did not supply them. */
   source_notes: string[] | null;
   subjects: string[];
-  /** Every upstream summary, in upstream order. Empty when there are none. */
+  /** Source summaries: sorted on the RDF mirror, upstream order on live fallback. */
   summaries: string[];
-  /** First entry of {@link summaries}, or null when upstream sent none. */
+  /** First entry of {@link summaries}, not necessarily primary, or null when absent. */
   summary: string | null;
   title: string;
   translators: Person[];
@@ -90,9 +90,73 @@ export function foldSearchText(value: string): string {
   return value.toLowerCase().replaceAll('ς', 'σ');
 }
 
+/** Catalog substring matching ignores accents and expands letters NFKD leaves intact. */
+export function foldCatalogText(value: string): string {
+  return foldSearchText(value)
+    .normalize('NFKD')
+    .replaceAll(/\p{M}/gu, '')
+    .replaceAll('æ', 'ae')
+    .replaceAll('œ', 'oe')
+    .replaceAll('ø', 'o')
+    .replaceAll('ß', 'ss')
+    .replaceAll('ł', 'l')
+    .replaceAll('ð', 'd')
+    .replaceAll('þ', 'th');
+}
+
+/** Remove reserved MARC subfields while retaining their bibliographic separators and literal dollars. */
+export function normalizeTitle(value: string): string {
+  const parts: string[] = [];
+  let start = 0;
+  for (let index = value.indexOf('$'); index !== -1; index = value.indexOf('$', index + 1)) {
+    let before = index;
+    while (before > start && /\s/u.test(value.charAt(before - 1))) before -= 1;
+    const separator =
+      before > start && ':;='.includes(value.charAt(before - 1)) ? value[before - 1] : undefined;
+    const code = value[index + 1];
+    const marked =
+      code !== undefined &&
+      'bcv'.includes(code) &&
+      (index + 2 === value.length || /[\s:;=]/u.test(value.charAt(index + 2)));
+    if (
+      !marked &&
+      !(
+        separator !== undefined &&
+        (index + 1 === value.length || /\s/u.test(value.charAt(index + 1)))
+      )
+    )
+      continue;
+    if (separator === undefined && before === index && index !== 0) continue;
+    let cut = separator === undefined ? before : before - 1;
+    while (cut > start && /\s/u.test(value.charAt(cut - 1))) cut -= 1;
+    let end = index + (marked ? 2 : 1);
+    while (end < value.length && /\s/u.test(value.charAt(end))) end += 1;
+    if (value[end] === ':') {
+      end += 1;
+      while (end < value.length && /\s/u.test(value.charAt(end))) end += 1;
+    }
+    parts.push(
+      value.slice(start, cut),
+      separator === '=' ? ' =' : (separator ?? ':'),
+      end < value.length ? ' ' : '',
+    );
+    start = end;
+    index = end - 1;
+  }
+  if (start === 0) return value;
+  parts.push(value.slice(start));
+  return parts.join('');
+}
+
 /** Strip NULs and collapse whitespace between words; a value with no words is unset. */
 function normalizeWords(value: string | undefined): string | undefined {
-  return value?.replaceAll('\0', '').split(/\s+/u).filter(Boolean).join(' ') || undefined;
+  return (
+    value
+      ?.replaceAll('\0', '')
+      .split(/\s+/u)
+      .filter((word) => foldCatalogText(word) !== '')
+      .join(' ') || undefined
+  );
 }
 
 /**
@@ -104,15 +168,26 @@ function lowercaseCode(code: string): string {
   return lower.length === code.length ? lower : code;
 }
 
+/** MIME parameter values retain literal case; only type and subtype are case-insensitive. */
+function normalizeMimePrefix(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const separator = trimmed.indexOf(';');
+  return separator === -1
+    ? trimmed.toLowerCase()
+    : trimmed.slice(0, separator).toLowerCase() + trimmed.slice(separator);
+}
+
 /** Normalize form blanks and query whitespace before either catalog source sees them. */
 export function normalizeSearchParams(params: SearchParams): SearchParams {
+  const topic = params.topic?.trim();
   return {
     ...params,
     query: normalizeWords(params.query),
     translator: normalizeWords(params.translator),
-    topic: params.topic?.trim() || undefined,
+    topic: topic && foldCatalogText(topic).trim() ? topic : undefined,
     languages: params.languages?.length ? params.languages.map(lowercaseCode) : undefined,
-    mime_type: params.mime_type?.trim() || undefined,
+    mime_type: normalizeMimePrefix(params.mime_type),
     copyright: params.copyright?.length ? params.copyright : undefined,
     sort: params.sort ?? 'popular',
     page: params.page ?? 1,
@@ -132,10 +207,12 @@ export function hasPlainText(book: RawBook): boolean {
   return 'text/plain; charset=utf-8' in book.formats;
 }
 
-/** Whether the existing reader supports this record's media type and formats. */
+/** Eligible Text book formats for discovery; the reader independently attempts non-Sound records. */
 export function isReadable(book: Pick<RawBook, 'media_type' | 'formats'>): boolean {
   return (
-    book.media_type !== 'Sound' &&
-    ('text/plain; charset=utf-8' in book.formats || 'text/html' in book.formats)
+    book.media_type === 'Text' &&
+    ('text/plain; charset=utf-8' in book.formats ||
+      ('text/html' in book.formats &&
+        !Object.keys(book.formats).some((key) => key.startsWith('audio/'))))
   );
 }

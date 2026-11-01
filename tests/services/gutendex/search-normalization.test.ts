@@ -3,9 +3,30 @@
  * @module tests/services/gutendex/search-normalization.test
  */
 import { describe, expect, it } from 'vitest';
-import { foldSearchText, normalizeSearchParams } from '@/services/gutendex/types.js';
+import { foldSearchText, isReadable, normalizeSearchParams } from '@/services/gutendex/types.js';
 
 describe('normalizeSearchParams', () => {
+  it('normalizes only MIME type and subtype casing', () => {
+    expect(normalizeSearchParams({ mime_type: ' TEXT/PLAIN; Profile=Case ' }).mime_type).toBe(
+      'text/plain; Profile=Case',
+    );
+  });
+  it.each([
+    ['StillImage', { 'text/plain; charset=utf-8': 'x' }, false],
+    ['Text', { 'text/html': 'x', 'audio/mpeg': 'y' }, false],
+    ['Text', { 'text/plain; charset=utf-8': 'x', 'audio/mpeg': 'y' }, true],
+    ['Text', { 'text/html': 'x' }, true],
+    ['Sound', { 'text/html': 'x' }, false],
+    ['Text', { 'text/plain; charset=us-ascii': 'x' }, false],
+  ] as const)('classifies eligible formats for %s', (media_type, formats, expected) => {
+    expect(isReadable({ media_type, formats })).toBe(expected);
+  });
+  it('preserves MIME suffix case and blank-as-unset behavior', () => {
+    expect(normalizeSearchParams({ mime_type: 'text/plain; Profile=Case' }).mime_type).toBe(
+      'text/plain; Profile=Case',
+    );
+    expect(normalizeSearchParams({ mime_type: '  ' }).mime_type).toBeUndefined();
+  });
   it('removes upstream-ignored NULs and normalizes whitespace without spending live search slots on blanks', () => {
     expect(
       normalizeSearchParams({

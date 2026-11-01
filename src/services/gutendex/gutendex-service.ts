@@ -18,6 +18,7 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { bestEffortCache } from '@/services/best-effort-cache.js';
 import { getCatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
 import {
@@ -25,6 +26,7 @@ import {
   hasPlainText,
   isReadable,
   normalizeSearchParams,
+  normalizeTitle,
   type RawBook,
   type RawBooksPage,
   type RawPerson,
@@ -78,7 +80,7 @@ function normalizePerson(p: RawPerson) {
 function normalizeBook(raw: RawBook): Book {
   return {
     id: raw.id,
-    title: raw.title,
+    title: normalizeTitle(raw.title),
     authors: raw.authors.map(normalizePerson),
     translators: raw.translators.map(normalizePerson),
     editors: raw.editors?.map(normalizePerson) ?? [],
@@ -110,6 +112,16 @@ export class GutendexService {
     this.baseUrl = serverConfig.gutendexBaseUrl.endsWith('/')
       ? serverConfig.gutendexBaseUrl
       : `${serverConfig.gutendexBaseUrl}/`;
+  }
+
+  /** Optional diagnostics never fall back to a live request or invalidate an answered search. */
+  async hasMirrorLanguages(codes: string[], ctx: Context): Promise<boolean | undefined> {
+    try {
+      return await getCatalogMirrorService().hasLanguages(codes);
+    } catch (error: unknown) {
+      if (ctx.signal.aborted) throw error;
+      return undefined;
+    }
   }
 
   /** Build a Gutendex query URL from search parameters. */
@@ -199,7 +211,7 @@ export class GutendexService {
         ),
     );
 
-    await ctx.state.set(cacheKey, page, { ttl: CATALOG_TTL_SECONDS });
+    await bestEffortCache(ctx, cacheKey, page, CATALOG_TTL_SECONDS);
     return page;
   }
 
@@ -309,7 +321,7 @@ export class GutendexService {
    * the record, and falls through to the live catalog otherwise. Throws not_found if
    * the live lookup 404s.
    */
-  async getBook(id: number, ctx: Context): Promise<Book> {
+  async getBook(id: number, ctx: Context, deadlineAtMs?: number): Promise<Book> {
     const mirrored = await this.mirrorBook(id, ctx);
     if (mirrored !== null) {
       ctx.log.debug('Catalog mirror hit', { id });
@@ -325,10 +337,14 @@ export class GutendexService {
       return normalizeBook(cached);
     }
 
+    const budgetMs =
+      deadlineAtMs === undefined
+        ? CATALOG_BUDGET_MS
+        : Math.max(0, Math.min(CATALOG_BUDGET_MS, deadlineAtMs - Date.now()));
     const raw = await withUpstreamDeadline(
       ctx,
       {
-        budgetMs: CATALOG_BUDGET_MS,
+        budgetMs,
         message: `The Project Gutenberg catalog did not respond for book ${id}.`,
         reason: CATALOG_UNAVAILABLE,
       },
@@ -360,13 +376,13 @@ export class GutendexService {
           {
             operation: 'GutendexService.getBook',
             baseDelayMs: 1000,
-            deadlineMs: CATALOG_BUDGET_MS,
+            deadlineMs: budgetMs,
             signal,
           },
         ),
     );
 
-    await ctx.state.set(cacheKey, raw, { ttl: CATALOG_TTL_SECONDS });
+    await bestEffortCache(ctx, cacheKey, raw, CATALOG_TTL_SECONDS);
     return normalizeBook(raw);
   }
 }

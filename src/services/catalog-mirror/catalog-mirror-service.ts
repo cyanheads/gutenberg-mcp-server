@@ -27,7 +27,7 @@ import { schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type Book,
-  foldSearchText,
+  foldCatalogText,
   normalizeSearchParams,
   type SearchParams,
 } from '@/services/gutendex/types.js';
@@ -178,6 +178,18 @@ export class CatalogMirrorService {
     return { books: rows.map(bookFromRow), total };
   }
 
+  /** Whether any stored edition has one of these exact language codes, ignoring discovery filters. */
+  async hasLanguages(codes: string[]): Promise<boolean> {
+    const db = await this.mirror.raw();
+    return (
+      db
+        .prepare<{ present: number }>(
+          'SELECT EXISTS (SELECT 1 FROM books, json_each(languages) WHERE value IN (SELECT value FROM json_each(?))) AS present',
+        )
+        .get(JSON.stringify(codes))?.present === 1
+    );
+  }
+
   /** Complete discovery: identical predicates drive totals and the selected page. */
   async searchBooks(input: SearchParams): Promise<CatalogQueryResult> {
     const params = normalizeSearchParams(input);
@@ -188,19 +200,19 @@ export class CatalogMirrorService {
       predicates.push(
         'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE instr(title_folded, term.value) = 0 AND NOT EXISTS (SELECT 1 FROM json_each(authors_folded) AS author WHERE instr(author.value, term.value) > 0))',
       );
-      values.push(JSON.stringify([...new Set(foldSearchText(params.query).split(' '))]));
+      values.push(JSON.stringify([...new Set(foldCatalogText(params.query).split(' '))]));
     }
     if (params.translator) {
       predicates.push(
         'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE NOT EXISTS (SELECT 1 FROM json_each(translators_folded) AS translator WHERE instr(translator.value, term.value) > 0))',
       );
-      values.push(JSON.stringify([...new Set(foldSearchText(params.translator).split(' '))]));
+      values.push(JSON.stringify([...new Set(foldCatalogText(params.translator).split(' '))]));
     }
     if (params.topic) {
       predicates.push(
         '(EXISTS (SELECT 1 FROM json_each(subjects_folded) WHERE instr(value, ?) > 0) OR EXISTS (SELECT 1 FROM json_each(bookshelves_folded) WHERE instr(value, ?) > 0))',
       );
-      values.push(foldSearchText(params.topic), foldSearchText(params.topic));
+      values.push(foldCatalogText(params.topic), foldCatalogText(params.topic));
     }
     if (params.languages?.length) {
       predicates.push(

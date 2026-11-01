@@ -114,6 +114,73 @@ beforeEach(() => {
 // ── Happy path ───────────────────────────────────────────────────────────────
 
 describe('gutenbergGetText — happy path', () => {
+  it.each(['StillImage', 'Text'])(
+    'still attempts supported formats on an ineligible %s record',
+    async (media_type) => {
+      mockGutendexService.getBook.mockResolvedValue({
+        ...textBook,
+        media_type,
+        is_readable: false,
+      });
+      mockTextService.fetchAndCacheText.mockResolvedValue(cachedText);
+      const result = await runToolContract(gutenbergGetText, { id: 84 });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ text: LITERARY_TEXT });
+      expect(contentText(result)).toContain('Chapter 1.');
+      expect(mockTextService.fetchAndCacheText).toHaveBeenCalledOnce();
+    },
+  );
+  it('uses the normalized catalog title for title and provenance even with an older cached text title', async () => {
+    mockGutendexService.getBook.mockResolvedValue({
+      ...textBook,
+      title: 'Peter Pan: [Peter and Wendy]',
+    });
+    mockTextService.fetchAndCacheText.mockImplementation(
+      async (book: Book, id: number, ctx: Context) => {
+        await ctx.state.set(`gutenberg/text/v3/${id}`, {
+          ...cachedText,
+          title: 'Peter Pan : $b [Peter and Wendy]',
+        });
+        return realTextService().fetchAndCacheText(book, id, ctx);
+      },
+    );
+    const result = await runToolContract(gutenbergGetText, { id: 84 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      title: 'Peter Pan: [Peter and Wendy]',
+      text: LITERARY_TEXT,
+      provenance:
+        'Project Gutenberg eBook #84: Peter Pan: [Peter and Wendy] — https://www.gutenberg.org/ebooks/84 — License: www.gutenberg.org/license',
+    });
+    const rendered = readBack(contentText(result)).text;
+    expect(rendered).toContain('Peter Pan: [Peter and Wendy]');
+    expect(rendered).not.toContain('$b');
+  });
+  it('threads one absolute allowance through catalog resolution and text retrieval', async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineAtMs = Date.now() + 50_000;
+      mockGutendexService.getBook.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 14000));
+        return textBook;
+      });
+      mockTextService.fetchAndCacheText.mockResolvedValue(cachedText);
+      const ctx = createMockContext({ errors: gutenbergGetText.errors });
+      const pending = gutenbergGetText.handler(gutenbergGetText.input.parse({ id: 84 }), ctx);
+      await vi.advanceTimersByTimeAsync(14000);
+      await pending;
+      expect(mockGutendexService.getBook).toHaveBeenCalledWith(84, ctx, deadlineAtMs);
+      expect(mockTextService.fetchAndCacheText).toHaveBeenCalledWith(
+        textBook,
+        84,
+        ctx,
+        deadlineAtMs,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders literal book text in a collision-safe fence without changing offsets or structured text', async () => {
     const literary = '<em> *asterisks* _underscores_\n```\n``````\nend';
     mockGutendexService.getBook.mockResolvedValue(textBook);
@@ -797,7 +864,7 @@ describe('gutenbergGetText — error paths', () => {
       (_book: unknown, id: number, ctx: Context) =>
         Promise.reject(
           serviceUnavailable(
-            `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+            `Failed to fetch text for book ${id}: the Gutenberg mirror remained temporarily unavailable.`,
             { reason: 'text_fetch_failed', ...ctx.recoveryFor('text_fetch_failed') },
           ),
         ),
@@ -842,7 +909,7 @@ describe('gutenbergGetText — upstream outages reach both client surfaces', () 
       (_book: unknown, id: number, ctx: Context) =>
         Promise.reject(
           serviceUnavailable(
-            `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+            `Failed to fetch text for book ${id}: the Gutenberg mirror remained temporarily unavailable.`,
             { reason: 'text_fetch_failed', ...ctx.recoveryFor('text_fetch_failed') },
           ),
         ),

@@ -115,18 +115,18 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     is_readable: z
       .boolean()
       .describe(
-        'True for non-Sound records with a supported UTF-8 plain-text or HTML format for gutenberg_get_text.',
+        'Eligible Text record with UTF-8 plain text, or HTML without audio formats. Does not guarantee the mirror file exists.',
       ),
     summary: z
       .string()
       .nullable()
       .describe(
-        'First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.',
+        'First entry of summaries, not necessarily primary, or null when the source has none.',
       ),
     summaries: z
       .array(z.string())
       .describe(
-        'Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.',
+        'Every source-provided summary: sorted on the RDF mirror, upstream order on live fallback. Empty when there are none.',
       ),
     formats: z
       .record(z.string(), z.string())
@@ -153,7 +153,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The Project Gutenberg catalog did not answer within the time this server allows for one lookup.',
       recovery:
-        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
+        'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
       retryable: true,
       thrownBy: 'service',
     },

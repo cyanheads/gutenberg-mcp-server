@@ -146,7 +146,22 @@ describe('GutendexService — catalog ladder', () => {
     ['Text', { 'text/html': 'https://example/book.html' }, true, false],
     ['Text', { 'text/plain; charset=utf-8': 'https://example/book.txt' }, true, true],
     ['Sound', { 'text/html': 'https://example/readme.html' }, false, false],
-    ['Image', { 'text/html': 'https://example/book.html' }, true, false],
+    ['Image', { 'text/html': 'https://example/book.html' }, false, false],
+    [
+      'Text',
+      { 'text/html': 'https://example/book.html', 'audio/mpeg': 'https://example/audio.mp3' },
+      false,
+      false,
+    ],
+    [
+      'Text',
+      {
+        'text/plain; charset=utf-8': 'https://example/book.txt',
+        'audio/mpeg': 'https://example/audio.mp3',
+      },
+      true,
+      true,
+    ],
     ['Text', { 'text/plain; charset=us-ascii': 'https://example/book.txt' }, false, false],
   ])(
     'normalizes %s readability with formats %j on live and cached records',
@@ -183,6 +198,33 @@ describe('GutendexService — catalog ladder', () => {
     expect(result.books[0]?.has_plain_text).toBe(true);
     expect(result.source).toBe('live');
     expect(http.calls).toHaveLength(1);
+  });
+
+  it('normalizes live and cached titles while preserving literal dollars and summary order', async () => {
+    http.route({
+      match: ANY_CATALOG_URL,
+      respond: () =>
+        Response.json({
+          ...rawBook,
+          title: 'Peter Pan : $b [Peter and Wendy]',
+          summaries: ['Z first', 'A second'],
+        }),
+    });
+    const service = makeService();
+    const ctx = createMockContext();
+    for (let index = 0; index < 2; index++) {
+      expect(await service.getBook(1342, ctx)).toMatchObject({
+        title: 'Peter Pan: [Peter and Wendy]',
+        summary: 'Z first',
+        summaries: ['Z first', 'A second'],
+      });
+    }
+    expect(http.calls).toHaveLength(1);
+    await ctx.state.set('gutendex/book/1342', {
+      ...rawBook,
+      title: 'The $30,000 Bequest, and Other Stories',
+    });
+    expect((await service.getBook(1342, ctx)).title).toBe('The $30,000 Bequest, and Other Stories');
   });
 
   it('characterizes literal punctuation and four search words on the live URL', async () => {
@@ -351,6 +393,51 @@ describe('GutendexService — catalog ladder', () => {
     expect(http.calls).toHaveLength(1);
   });
 
+  it.each([false, true])(
+    'keeps standalone network allowance after a cache wait (shared deadline: %s)',
+    async (shared) => {
+      vi.useFakeTimers();
+      const ctx = createMockContext({ errors: gutenbergGetBook.errors });
+      vi.spyOn(ctx.state, 'get').mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return null;
+      });
+      http.route({
+        match: ANY_CATALOG_URL,
+        respond: (request) =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                const timer = setTimeout(() => {
+                  controller.enqueue(new TextEncoder().encode(JSON.stringify(rawBook)));
+                  controller.close();
+                }, 14000);
+                request.signal.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(timer);
+                    controller.error(request.signal.reason);
+                  },
+                  { once: true },
+                );
+              },
+            }),
+          ),
+      });
+      const deadlineAtMs = Date.now() + 15000;
+      const pending = (
+        shared ? makeService().getBook(1342, ctx, deadlineAtMs) : makeService().getBook(1342, ctx)
+      ).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(17000);
+      expect(await pending).toMatchObject(
+        shared
+          ? { data: { reason: 'catalog_unavailable' } }
+          : { id: 1342, title: 'Pride and Prejudice' },
+      );
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
   it('lets a retry consume the remaining budget after a fast transient failure', async () => {
     vi.useFakeTimers();
     let attempt = 0;
@@ -477,15 +564,16 @@ describe('GutendexService — catalog ladder', () => {
       gutenbergTextBaseUrl: 'https://mirror.test',
       mirrorPath: ':memory:',
     });
+    const deadlineAtMs = Date.now() + 50_000;
     const pending = makeService()
-      .getBook(1342, ctx)
-      .then((book) => text.fetchAndCacheText(book, 1342, ctx))
+      .getBook(1342, ctx, deadlineAtMs)
+      .then((book) => text.fetchAndCacheText(book, 1342, ctx, deadlineAtMs))
       .catch((error: unknown) => error);
     let settled = false;
     void pending.then(() => {
       settled = true;
     });
-    await vi.advanceTimersByTimeAsync(48900);
+    await vi.advanceTimersByTimeAsync(49900);
     expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(200);
     expect(await pending).toMatchObject({ data: { reason: 'text_fetch_failed' } });

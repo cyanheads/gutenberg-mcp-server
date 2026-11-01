@@ -22,7 +22,7 @@ import {
   initGutenbergTextService,
 } from '@/services/gutenberg-text/gutenberg-text-service.js';
 import type { CachedText } from '@/services/gutenberg-text/types.js';
-import { initGutendexService } from '@/services/gutendex/gutendex-service.js';
+import { GutendexService, initGutendexService } from '@/services/gutendex/gutendex-service.js';
 import type { Book } from '@/services/gutendex/types.js';
 
 /** Host the stubbed mirror answers on. No real request ever leaves the suite. */
@@ -124,6 +124,40 @@ describe('GutenbergTextService — mirror ladder', () => {
     vi.useRealTimers();
   });
 
+  it.each(['text', 'book', 'page'] as const)(
+    'preserves a cancelled cache-write rejection on %s',
+    async (lane) => {
+      http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
+      http.route({
+        match: /^https:\/\/catalog.test\//,
+        respond: () =>
+          Response.json(
+            lane === 'page' ? { count: 1, next: null, previous: null, results: [book] } : book,
+          ),
+      });
+      const controller = new AbortController();
+      const ctx = createMockContext({ signal: controller.signal });
+      const rejection = new Error('write rejected');
+      vi.spyOn(ctx.state, 'set').mockImplementation(async () => {
+        controller.abort('client cancelled');
+        throw rejection;
+      });
+      const catalog = new GutendexService({} as AppConfig, createInMemoryStorage(), {
+        gutendexBaseUrl: 'https://catalog.test/books/',
+        gutenbergTextBaseUrl: MIRROR_HOST,
+        mirrorPath: ':memory:',
+      });
+      const pending =
+        lane === 'text'
+          ? makeService().fetchAndCacheText(book, BOOK_ID, ctx)
+          : lane === 'book'
+            ? catalog.getBook(BOOK_ID, ctx)
+            : catalog.searchBooks({}, ctx);
+      await expect(pending).rejects.toBe(rejection);
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
   it('fetches, strips, and caches a book on the first attempt', async () => {
     http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
     const ctx = createMockContext({ errors: gutenbergGetText.errors });
@@ -135,6 +169,252 @@ describe('GutenbergTextService — mirror ladder', () => {
     expect(entry.title).toBe('Pride and Prejudice');
     expect(http.calls).toHaveLength(1);
   });
+
+  it.each(['text', 'book', 'page'] as const)(
+    'returns fetched data when real provider capacity rejects the %s cache write',
+    async (lane) => {
+      http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
+      http.route({
+        match: /^https:\/\/catalog.test\//,
+        respond: () =>
+          Response.json(
+            lane === 'page' ? { count: 1, next: null, previous: null, results: [book] } : book,
+          ),
+      });
+      const ctx = createMockContext();
+      const storage = createInMemoryStorage({ maxEntries: 1 });
+      const request = {
+        requestId: 'capacity',
+        timestamp: new Date().toISOString(),
+        operation: 'capacity',
+        tenantId: ctx.tenantId,
+      };
+      await storage.set('occupied', 'live entry', request, { ttl: 86400 });
+      const keys: string[] = [];
+      vi.spyOn(ctx.state, 'set').mockImplementation(async (key, value, options) => {
+        keys.push(key);
+        await storage.set(key, value, request, options);
+      });
+      const warning = vi.spyOn(ctx.log, 'warning');
+      const catalog = new GutendexService({} as AppConfig, storage, {
+        gutendexBaseUrl: 'https://catalog.test/books/',
+        gutenbergTextBaseUrl: MIRROR_HOST,
+        mirrorPath: ':memory:',
+      });
+      const call = () =>
+        lane === 'text'
+          ? makeService().fetchAndCacheText(book, BOOK_ID, ctx)
+          : lane === 'book'
+            ? catalog.getBook(BOOK_ID, ctx)
+            : catalog.searchBooks({}, ctx);
+      for (let i = 0; i < 2; i++) {
+        const result = await call();
+        expect(result).toMatchObject(
+          lane === 'text'
+            ? { text: 'It is a truth universally acknowledged.' }
+            : lane === 'book'
+              ? { id: BOOK_ID }
+              : { books: [{ id: BOOK_ID }], totalCount: 1 },
+        );
+        expect(await storage.get(keys[i] as string, request)).toBeNull();
+      }
+      expect(http.calls).toHaveLength(2);
+      expect(warning.mock.calls).toEqual(
+        keys.map((cacheKey) => ['Cache write failed', { cacheKey }]),
+      );
+      expect(await storage.get('occupied', request)).toBe('live entry');
+    },
+  );
+
+  it.each([
+    [0, 33000, false],
+    [14000, 33000, false],
+    [14000, 37000, true],
+  ])(
+    'shares the allowance after %i ms catalog and a %i ms text body',
+    async (catalogMs, textMs, fails) => {
+      vi.useFakeTimers();
+      const config = {
+        gutendexBaseUrl: 'https://catalog.test/books/',
+        gutenbergTextBaseUrl: MIRROR_HOST,
+        mirrorPath: ':memory:',
+      };
+      const storage = createInMemoryStorage();
+      initGutendexService({} as AppConfig, storage, config);
+      initGutenbergTextService({} as AppConfig, storage, config);
+      const body = (request: Request, value: string, delayMs: number) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              const timer = setTimeout(() => {
+                controller.enqueue(new TextEncoder().encode(value));
+                controller.close();
+              }, delayMs);
+              request.signal.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  controller.error(request.signal.reason);
+                },
+                { once: true },
+              );
+            },
+          }),
+        );
+      http.route({
+        match: `https://catalog.test/books/${BOOK_ID}/`,
+        respond: (request) => body(request, JSON.stringify(book), catalogMs),
+      });
+      http.route({ match: RESOLVED_URL, respond: (request) => body(request, MIRROR_FILE, textMs) });
+      const pending = runToolContract(gutenbergGetText, { id: BOOK_ID, limit: 100 });
+      await vi.advanceTimersByTimeAsync(50001);
+      const result = await pending;
+      expect(result.isError ?? false).toBe(fails);
+      if (fails) {
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            message: `The Gutenberg text download for book ${BOOK_ID} did not finish in time.`,
+            data: { reason: 'text_fetch_failed', recovery: { hint: expect.any(String) } },
+          },
+        });
+        expect(JSON.stringify(result.content)).toContain('did not finish in time');
+        expect(JSON.stringify(result.content)).toContain('Recovery:');
+      } else {
+        expect(result.structuredContent).toMatchObject({
+          text: 'It is a truth universally acknowledged.',
+          title: book.title,
+        });
+        expect(JSON.stringify(result.content)).toContain('It is a truth universally acknowledged.');
+      }
+      expect(http.calls.filter((call) => call.request.url === RESOLVED_URL)).toHaveLength(1);
+      expect(JSON.stringify(result)).not.toContain('mirror.test');
+    },
+  );
+
+  it('allows a retry to finish a slow body within the remaining allowance', async () => {
+    vi.useFakeTimers();
+    let requests = 0;
+    http.route({
+      match: RESOLVED_URL,
+      respond: (request) => {
+        requests++;
+        if (requests === 1) return new Response('busy', { status: 503 });
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              const timer = setTimeout(() => {
+                controller.enqueue(new TextEncoder().encode(MIRROR_FILE));
+                controller.close();
+              }, 33000);
+              request.signal.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  controller.error(request.signal.reason);
+                },
+                { once: true },
+              );
+            },
+          }),
+        );
+      },
+    });
+    const pending = makeService().fetchAndCacheText(book, BOOK_ID, createMockContext());
+    await vi.advanceTimersByTimeAsync(50000);
+    expect(await pending).toMatchObject({ text: 'It is a truth universally acknowledged.' });
+    expect(requests).toBe(2);
+  });
+
+  it('preserves a caller cancellation during text retry backoff without another request', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    http.route({ match: RESOLVED_URL, respond: () => new Response('busy', { status: 503 }) });
+    const pending = makeService()
+      .fetchAndCacheText(book, BOOK_ID, createMockContext({ signal: controller.signal }))
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(http.calls).toHaveLength(1);
+    controller.abort('client cancelled in backoff');
+    expect(await pending).toBe('client cancelled in backoff');
+    await vi.advanceTimersByTimeAsync(50000);
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('does not start text I/O when storage consumed the remaining upstream allowance', async () => {
+    vi.useFakeTimers();
+    const ctx = createMockContext();
+    vi.spyOn(ctx.state, 'get').mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 50001);
+      return null;
+    });
+    await expect(makeService().fetchAndCacheText(book, BOOK_ID, ctx)).rejects.toMatchObject({
+      message: `The Gutenberg text download for book ${BOOK_ID} did not finish in time.`,
+      data: { reason: 'text_fetch_failed' },
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it.each(['stall', 'fast', 'cancel'] as const)(
+    'carries %s failures through the real tool without exposing its upstream',
+    async (failure) => {
+      vi.useFakeTimers();
+      const config = {
+        gutendexBaseUrl: 'https://catalog.test/books/',
+        gutenbergTextBaseUrl: MIRROR_HOST,
+        mirrorPath: ':memory:',
+      };
+      const storage = createInMemoryStorage();
+      initGutendexService({} as AppConfig, storage, config);
+      initGutenbergTextService({} as AppConfig, storage, config);
+      http.route({
+        match: `https://catalog.test/books/${BOOK_ID}/`,
+        respond: () => Response.json(book),
+      });
+      http.route({
+        match: RESOLVED_URL,
+        respond:
+          failure === 'stall'
+            ? stallingResponder
+            : () => new Response('private failure document', { status: 503 }),
+      });
+      const controller = new AbortController();
+      const pending = runToolContract(
+        gutenbergGetText,
+        { id: BOOK_ID },
+        { context: { signal: controller.signal } },
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      if (failure === 'cancel') controller.abort('client cancelled the read');
+      await vi.advanceTimersByTimeAsync(50000);
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      if (failure === 'cancel') {
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.RequestCancelled },
+        });
+        expect(JSON.stringify(result.content)).toMatch(/cancel/i);
+      } else {
+        const message =
+          failure === 'stall'
+            ? `The Gutenberg text download for book ${BOOK_ID} did not finish in time.`
+            : `Failed to fetch text for book ${BOOK_ID}: the Gutenberg mirror remained temporarily unavailable.`;
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            message,
+            data: { reason: 'text_fetch_failed', recovery: { hint: expect.any(String) } },
+          },
+        });
+        expect(JSON.stringify(result.content)).toContain(message);
+        expect(JSON.stringify(result.content)).toContain('Recovery:');
+      }
+      expect(http.calls.filter((call) => call.request.url === RESOLVED_URL)).toHaveLength(
+        failure === 'fast' ? 4 : 1,
+      );
+      expect(JSON.stringify(result)).not.toMatch(
+        /mirror.test|private failure document|cache\/epub/,
+      );
+    },
+  );
 
   it.each([
     [404, 'text_file_not_found', JsonRpcErrorCode.NotFound],
@@ -333,6 +613,8 @@ describe('GutenbergTextService — mirror ladder', () => {
     expect(err.message).not.toContain(MIRROR_HOST);
     expect(err.message).not.toContain(RESOLVED_URL);
     expect(err.message).not.toContain('cache/epub');
+    expect(err.message).toContain('remained temporarily unavailable');
+    expect(err.message).not.toContain('in time');
     // The original — URL and all — stays reachable server-side for logs only.
     expect(err.cause).toBeInstanceOf(McpError);
     expect((err.cause as McpError).message).toContain('mirror.test');
@@ -352,7 +634,7 @@ describe('GutenbergTextService — mirror ladder', () => {
     void pending.then(() => {
       settled = true;
     });
-    await vi.advanceTimersByTimeAsync(34_900);
+    await vi.advanceTimersByTimeAsync(49_900);
     expect(settled).toBe(false);
 
     await vi.advanceTimersByTimeAsync(200);
@@ -390,19 +672,18 @@ describe('GutenbergTextService — mirror ladder', () => {
     expect(err.code).not.toBe(JsonRpcErrorCode.ServiceUnavailable);
   });
 
-  it('lets a cache-write failure bubble as itself instead of relabelling it text_fetch_failed', async () => {
-    // The two ctx.state operations around the fetch are outside the mirror's
-    // failure class — a storage error must not be handed the wrong recovery hint.
+  it('returns fetched text after a cache-write failure without disclosing its cause', async () => {
     http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
     const ctx = createMockContext({ errors: gutenbergGetText.errors });
-    const storageFailure = databaseError('Cache write rejected');
+    const storageFailure = databaseError('https://private-cache.test/?token=secret');
     vi.spyOn(ctx.state, 'set').mockRejectedValue(storageFailure);
 
-    const err = await makeService()
-      .fetchAndCacheText(book, BOOK_ID, ctx)
-      .catch((e: unknown) => e);
-
-    expect(err).toBe(storageFailure);
+    const warning = vi.spyOn(ctx.log, 'warning');
+    const entry = await makeService().fetchAndCacheText(book, BOOK_ID, ctx);
+    expect(entry.text).toBe('It is a truth universally acknowledged.');
+    expect(warning.mock.calls).toEqual([
+      ['Cache write failed', { cacheKey: `gutenberg/text/v3/${BOOK_ID}` }],
+    ]);
   });
 });
 

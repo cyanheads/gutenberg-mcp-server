@@ -16,6 +16,7 @@ import {
   type Book,
   hasPlainText,
   isReadable,
+  normalizeTitle,
   type Person,
   type RawBook,
 } from '@/services/gutendex/types.js';
@@ -226,7 +227,7 @@ export function parseBookRdf(xml: string, id: number): Book | null {
   const raw: Required<RawBook> = {
     id,
     /** A record with no `dcterms:title` is rare; the empty string keeps the field a string. */
-    title: title === undefined ? '' : fixSubtitles(title),
+    title: title === undefined ? '' : normalizeTitle(fixSubtitles(title)),
     authors: peopleOf(ebook, 'dcterms:creator'),
     editors: peopleOf(ebook, 'marcrel:edt'),
     translators: peopleOf(ebook, 'marcrel:trl'),

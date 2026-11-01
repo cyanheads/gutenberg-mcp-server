@@ -63,7 +63,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
     books: z.array(z.object({
       id: z.number().describe('Gutenberg ID.'),
       title: z.string().describe('Book title.'),
-      has_plain_text: z.boolean().describe('True if gutenberg_get_text will work for this book.'),
+      has_plain_text: z.boolean().describe('True for Text records with a UTF-8 plain-text format; file existence is not guaranteed.'),
     })).describe('Matching books.'),
     totalCount: z.number().describe('Total books matching the query.'),
     hasMore: z.boolean().describe('True if more pages are available.'),
@@ -246,7 +246,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ## Structure
 
-Discovery uses the ready RDF mirror with Unicode substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with a notice and normalized typed criteria. MIME-prefix and tri-state copyright filters apply on both sources; browse continuation preserves them and repeats page 1 if its cap cuts the first page. Mirror schema v4 backfills the Unicode-folded columns (v3) and the folded translator names (v4, written only for rows that list a translator) from existing rows in bounded batches without reharvesting; the mirror-only `translator` filter fails with `translator_requires_mirror` on live fallback. Live attempts consume the remaining 15-second catalog budget rather than restarting after five seconds.
+Discovery uses the ready RDF mirror with case- and accent-insensitive substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live, where matching is upstream-defined. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with source-aware guidance naming only supplied filters and normalized typed criteria. Optional mirror language diagnostics cannot invalidate an answered search. MIME type/subtype prefixes are lowercased while parameter suffix case stays literal; tri-state copyright filters apply on both sources. Browse continuation preserves filters and repeats page 1 if its cap cuts the first page. Schema v5 normalizes stored titles with the FTS trigger active, then rewrites all five catalog-folded fields with it suspended, preserving null translator columns without harvesting. The mirror-only `translator` filter fails with `translator_requires_mirror` on live fallback. Standalone catalog network work retains 15 seconds; reading shares one absolute 50-second upstream allowance across catalog and text. Cache writes are awaited best effort and cancellation stays unchanged.
 
 ```text
 src/

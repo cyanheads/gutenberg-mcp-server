@@ -97,15 +97,17 @@ Each step is independently testable. The text service can be unit-tested with a 
 
 **Source:** the ready local RDF mirror; cold/unreadable mirrors fall back to `GET https://gutendex.com/books/?search=...&topic=...&languages=...&sort=...&page=...&mime_type=...&copyright=...`. Parameterized SQLite predicates apply before both totals and page selection, with ID tie-breaks for popular ordering. Empty results remain local answers. Metadata retains its per-ID fallback.
 
-Every nonblank whitespace-separated query word must occur in a title or author name as a case-insensitive literal substring. Unicode-folded title and JSON author/category columns are populated at ingest; schema v3 backfills existing rows in bounded batches without harvesting. FTS token semantics would narrow substring matches, so discovery uses `instr` on folded values, preserving literal percent/underscore punctuation. Live fallback rejects more than four words with `query_requires_mirror`, before any request, rather than silently dropping constraints.
+Every nonblank whitespace-separated query word must occur in a title or author name as a literal substring. The mirror's catalog fold ignores case and accents (NFKD, combining-mark removal, then æ→ae, œ→oe, ø→o, ß→ss, ł→l, ð→d, þ→th). Query, translator and topic use this fold; words that fold empty are removed and entirely empty filters are unset. Passage `find` retains its separate accent-sensitive fold. Live matching is upstream-defined and rejects more than four words with `query_requires_mirror` before any request.
+
+Schema v5 normalizes stored MARC subtitle/contributor/volume markers, preserving bibliographic separators and literal dollars, then rewrites all five folded columns without harvesting. Titles update with the FTS trigger active; folded-only updates suspend and restore that trigger. Null translator columns remain null. RDF ingestion and live normalization share the title normalizer. Discovery uses `instr` on folded values, preserving literal percent/underscore punctuation rather than FTS token semantics.
 
 `translator` follows the same word rule against a folded JSON column of translator names: every nonblank word must occur in a translator name as a case-insensitive literal substring, and different words may land on different translators of one book. Gutendex has no translator parameter, so the filter is mirror-only; with the mirror unable to answer it fails with `translator_requires_mirror` rather than dropping the constraint. Schema v4 adds the column and backfills it in bounded batches, writing only rows that list a translator (a null column matches no translator filter), so a first open of an existing mirror pays one pass over those rows and no harvest. Result rows omit translators; `gutenberg_get_book` reports them.
 
 `author_year_start` and `author_year_end` match an author with a known birth or death year on or after the start and on or before the end. Alone, each bound reads the stored per-book extremes. Together, the mirror also requires one author to meet both bounds, so an author whose only known year falls outside the range is dropped even when another author of the book falls inside. Gutendex checks the bounds separately; when the live fallback answers a two-bound search, a notice says so.
 
-The service reports which source answered (mirror, live, or none for an empty `ids`) so the tool can compose that notice; `source` is not part of the tool output. An empty result for a three-letter `languages` code carries a notice that codes match exactly (`en`, not `eng`).
+The service reports which source answered (mirror, live, or none for an empty `ids`) so the tools compose one notice; `source` is not part of the tool output. Empty advice names only normalized supplied filters, with MIME-prefix examples when relevant. A mirror-only language-presence lookup on empty three-letter-code results suppresses the English-code hint for known codes; a failed optional lookup preserves the answer and omits the unverified hint, without a live request. Live fallback retains the exact-code caveat. An empty live ASCII query adds an accent hint. Search reports IDs that matched nothing under these filters only on page 1 without more pages. Browse at the cap points to continuation; below the cap it may also suggest raising the limit.
 
-Both discovery tools accept `mime_type` (literal format-key prefix) and `copyright` (`"true"`, `"false"`, `"null"`, OR). False is the source's public-domain-in-the-USA classification; null remains unknown. Blank optional strings and empty language/copyright lists are unset. An explicit `ids: []` selects nothing without catalog I/O. Both tools declare typed `effectiveCriteria` and `notice` enrichment for full text and structured output; empty first-page matches are successful empty collections, while exhausted pages retain `page_out_of_range`.
+Both discovery tools accept `mime_type` (literal format-key prefix; lowercase type/subtype before the first semicolon, leaving parameter suffix case intact) and `copyright` (`"true"`, `"false"`, `"null"`, OR). False is the source's public-domain-in-the-USA classification; null remains unknown. Blank optional strings and empty language/copyright lists are unset. An explicit `ids: []` selects nothing without catalog I/O. Language items retain their advertised length of 2–3 characters; overlong values explain that codes such as "en" or "fr" must be separate items. Both tools declare typed `effectiveCriteria` and `notice` enrichment for full text and structured output; empty first-page matches are successful empty collections, while exhausted pages retain `page_out_of_range`.
 
 ```ts
 tool('gutenberg_search_books', {
@@ -118,10 +120,10 @@ tool('gutenberg_search_books', {
     query: z.string().optional()
       .describe('Every nonblank query word matches a case-insensitive literal title/author substring. More than four words require the local mirror.'),
     topic: z.string().optional()
-      .describe('Case-insensitive phrase to match against subjects and bookshelves. Example: "detective" returns books on the "Detective and Mystery Stories" bookshelf and with subject "Detective and mystery stories". Separate from query — topic searches categorization metadata, not title/author.'),
+      .describe('Phrase to match against subjects and bookshelves, ignoring case and, on the local mirror, accents. Example: "detective" matches the "Detective Fiction" bookshelf and "Detective and mystery stories" subject. Separate from query — topic searches categorization metadata, not title/author.'),
     translator: z.string().optional()
-      .describe('Every nonblank whitespace-separated word must match a translator name as a case-insensitive literal substring; words can land on different translators of one book, and accents must match. Requires the local mirror. Example: "maude" finds the Aylmer and Louise Maude translations. Result rows omit translators; gutenberg_get_book reports them.'),
-    languages: z.array(z.string().min(2).max(3)).optional()
+      .describe('Every nonblank whitespace-separated word must match a translator name as a literal substring, ignoring case and accents; words can land on different translators of one book. Requires the local mirror. Example: "maude" finds the Aylmer and Louise Maude translations. Result rows omit translators; gutenberg_get_book reports them.'),
+    languages: z.array(z.string().min(2).max(3, 'Use a catalog language code such as "en" or "fr". Pass several codes as separate items.')).optional()
       .describe('Filter to books in any of these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English, ["fr", "de"] for French or German, ["enm"] for Middle English. The catalog spans 60+ languages; English is by far the largest set.'),
     author_year_start: z.number().int().optional()
       .describe('Include only books with an author who has a known birth or death year on or after this year (positive = CE, negative = BCE). With author_year_end, one author must meet both bounds.'),
@@ -148,7 +150,7 @@ tool('gutenberg_search_books', {
       subjects: z.array(z.string()).describe('Library of Congress subject headings for the work.'),
       download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
       has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; use is_readable for reader support.'),
-      is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
+      is_readable: z.boolean().describe('Eligible Text record with UTF-8 plain text, or HTML without audio formats; mirror file existence is not guaranteed.'),
     })).describe('Matching books, ordered by the sort parameter.'),
     totalCount: z.number().describe('Total number of books matching the query across all pages.'),
     page: z.number().describe('Current page number.'),
@@ -181,7 +183,7 @@ tool('gutenberg_search_books', {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The Project Gutenberg catalog did not answer within the time this server allows for one search.',
-      recovery: 'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
+      recovery: 'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -234,9 +236,9 @@ tool('gutenberg_get_book', {
     media_type: z.string().describe('Source media type; use is_readable for reader support.'),
     download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
     source_notes: z.array(z.string()).nullable().describe('Direct RDF bibliographic notes, in order. [] means inspected empty; null means unavailable.'),
-    is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
-    summary: z.string().nullable().describe('First entry of summaries — the primary auto-generated summary of the work, or null when Gutendex has none.'),
-    summaries: z.array(z.string()).describe('Every summary Gutendex holds for this work, in upstream order. Usually one; some records carry a long and a short variant. Empty when there are none.'),
+    is_readable: z.boolean().describe('Eligible Text record with UTF-8 plain text, or HTML without audio formats; mirror file existence is not guaranteed.'),
+    summary: z.string().nullable().describe('First entry of summaries, not necessarily primary, or null when the source has none.'),
+    summaries: z.array(z.string()).describe('Every source-provided summary: sorted on the RDF mirror, upstream order on live fallback. Empty when there are none.'),
     formats: z.record(z.string(), z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
     has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; HTML-only editions may have is_readable=true.'),
   }),
@@ -252,7 +254,7 @@ tool('gutenberg_get_book', {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The Project Gutenberg catalog did not answer within the time this server allows for one lookup.',
-      recovery: 'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
+      recovery: 'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -348,8 +350,8 @@ tool('gutenberg_get_text', {
     {
       reason: 'no_text_format',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an older ASCII-only entry).',
-      recovery: 'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, ASCII-only, or other formats this server cannot read as text.',
+      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an ASCII-only or PDF/TeX-only entry).',
+      recovery: 'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, PDF/TeX, ASCII-only, or other formats this server cannot read as text.',
     },
     {
       reason: 'offset_out_of_range',
@@ -366,7 +368,7 @@ tool('gutenberg_get_text', {
     {
       reason: 'text_fetch_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Gutenberg mirror had a transient failure or did not respond within the request budget.',
+      when: 'The Gutenberg mirror had a transient failure or the download did not finish within the remaining upstream allowance.',
       recovery: 'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
       thrownBy: 'service',
@@ -375,7 +377,7 @@ tool('gutenberg_get_text', {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The catalog lookup that precedes reading a book did not answer within the time this server allows.',
-      recovery: 'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry in a few seconds, or call gutenberg_get_book to confirm the catalog is answering again.',
+      recovery: 'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry later, or call gutenberg_get_book to confirm the catalog is answering again.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -403,7 +405,7 @@ tool('gutenberg_browse_popular', {
   input: z.object({
     mime_type: z.string().optional().describe('Literal format MIME prefix; blank means unset.'),
     copyright: z.array(z.enum(['true', 'false', 'null'])).optional().describe('Any selected copyright status: false means public domain in the USA, null means unknown; empty means all.'),
-    languages: z.array(z.string().min(2).max(3)).optional()
+    languages: z.array(z.string().min(2).max(3, 'Use a catalog language code such as "en" or "fr". Pass several codes as separate items.')).optional()
       .describe('Restrict to books in these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English only, ["de", "fr"] for German or French, ["ang"] for Old English. Omit for all languages.'),
     topic: z.string().optional()
       .describe('Filter by a subject or bookshelf keyword (case-insensitive phrase match). Example: "science fiction", "adventure", "detective". Applies on top of the language filter.'),
@@ -423,7 +425,7 @@ tool('gutenberg_browse_popular', {
       languages: z.array(z.string()).describe('Language codes.'),
       download_count: z.number().describe('Downloads in the last 30 days at the source snapshot — the popularity ranking basis.'),
       has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.'),
-      is_readable: z.boolean().describe('True for non-Sound records with supported UTF-8 plain text or HTML.'),
+      is_readable: z.boolean().describe('Eligible Text record with UTF-8 plain text, or HTML without audio formats; mirror file existence is not guaranteed.'),
     })).describe('Top books by downloads in the last 30 days at the source snapshot, most popular first.'),
     totalInCatalog: z.number().describe('Total books matching the filter in the full catalog (useful for context — "top 20 of 60,000").'),
     requestedLimit: z.number().describe('Book limit requested before capping.'),
@@ -433,7 +435,7 @@ tool('gutenberg_browse_popular', {
   errors: [{
     reason: 'catalog_unavailable', code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'The catalog did not respond within its budget.',
-    recovery: 'Retry in a few seconds; changing filters does not resolve an upstream outage.',
+    recovery: 'Retry later; changing filters does not resolve an upstream outage.',
     retryable: true, thrownBy: 'service',
   }],
 })
@@ -457,7 +459,7 @@ This section specifies `gutenberg_get_text`'s text-processing pipeline. It is th
                                 mirror (default gutenberg.pglaf.org), never from Gutendex's
                                 raw format URL: .../cache/epub/N/pgN.txt for utf-8,
                                 .../cache/epub/N/pgN-images.html for the html fallback;
-                                30s timeout
+                                remaining shared 50s upstream allowance after catalog resolution
 3. Decode as UTF-8             — the mirror serves generated UTF-8 bytes for both formats;
                                 reject recognized invalid documents, not content headers alone
 4. Strip BOM                  — remove a leading decoded UTF-8 BOM if present
@@ -499,6 +501,8 @@ Rather than cutting at exactly `offset + limit` characters, find the last `\n\n`
 
 Cache the extracted (stripped, normalized) text through tenant-scoped storage at `gutenberg/text/v3/{id}`, with a 24-hour TTL. Chunking and passage search run after cache lookup. The version segment moves whenever the pipeline changes stored text, so offsets from an older key version do not carry over. Fetching and processing still buffer the whole book in memory; there is no document-size cap or synchronous parsing deadline.
 
+Catalog page, single-book and text cache writes are awaited best effort: a rejected write returns fetched data and logs `Cache write failed` with only the safe cache key. Caller cancellation preserves the original rejection. Cache reads and eviction retain their existing behavior. Text response titles and provenance come from current normalized catalog metadata even when a text cache entry retains an older title; the text cache key and offsets do not change.
+
 ### HTML fallback
 
 A small minority of books lack a `text/plain; charset=utf-8` format and only have `text/html`. In this case:
@@ -522,10 +526,10 @@ Validate media type and document shape before caching. Plain-text paths reject H
 | # | Call | Purpose | Notes |
 |:--|:-----|:--------|:------|
 | 1 | Ready local mirror, else `GET gutendex.com/books/{id}/` | Resolve formats + verify media_type | Cached; throws `audio_book` or `no_text_format` early; live attempts consume the remaining 15s ladder budget |
-| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; 30s per attempt under a 35s ladder budget |
+| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; attempts and retries consume the remainder of the shared 50s upstream allowance |
 | — | In-process pipeline | BOM strip, HTML parsing when needed, marker extraction, normalize, chunk | CPU-only; depends on file size and format |
 
-Two upstream calls total for a cache miss, one (or zero) for a cache hit. Worst case both hops exhaust their budgets: 50 seconds, inside the 60-second default MCP client request timeout, so the caller receives a real error instead of its own timeout. The catalog call and the text fetch are independent enough to parallelize — but since the text URL comes from the catalog record, they must be sequential on a cache miss. Parallelism only helps after the first call populates the catalog cache.
+Two upstream calls total for a cache miss, one (or zero) for a cache hit. One absolute 50s upstream allowance starts before catalog resolution; catalog network work gets at most 15s and text attempts consume the remainder. Storage and synchronous extraction are not hard bounded by that allowance. Metadata must precede text format selection. Actual expiry says the download did not finish in time; exhausted transient retries say the mirror remained temporarily unavailable.
 
 ### Typical agent workflow
 
@@ -557,14 +561,14 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Cache stripped text, not raw file bytes** | The post-extraction text is what every request re-uses. Caching raw bytes wastes memory and requires re-running the extraction pipeline on every request. |
 | **24-hour text cache TTL, 1-hour catalog TTL** | Text files are effectively immutable (updated at most a few times a year). Catalog metadata changes more often (download counts, new additions). Different TTLs reflect actual update frequency. |
 | **No `author_year_start/end` in `browse_popular`** | `browse_popular` is a discovery shortcut, not a research tool. Year-range filtering on a popularity browse is a niche compound query that belongs in `search_books` where the fuller filter set is available. |
-| **Separate `is_readable` and `has_plain_text`** | `is_readable` follows the existing reader boundary: non-Sound with UTF-8 plain text or HTML. `has_plain_text` keeps the narrower Text + UTF-8 meaning. Both are computed at hydration, so old mirror records gain readability without a harvest. |
+| **Separate `is_readable` and `has_plain_text`** | `is_readable` requires Text with UTF-8 plain text, or HTML without any audio format key; this excludes metadata and audio-index records from reading recommendations. It does not guarantee the generated mirror file exists. `has_plain_text` keeps Text + UTF-8 meaning. Both are computed at hydration without harvesting. The reader still attempts supported formats on non-Sound records regardless of the flag. |
 | **Nullable source notes in the mirror** | Direct RDF book descriptions preserve explicit edition references without another fetch. An additive nullable column keeps existing rows readable with `null`; the next normal harvest distinguishes populated notes from inspected-empty `[]`. |
 | **Positive requested limits with local output caps** | Text stays bounded at 50,000 characters and browse at 32 books without adding upstream work. Requested/applied limits are explicit; actual remaining text or catalog matches determine truncation. |
 | **`ids` as comma-separated query string value** | The Gutendex API accepts ids as a single comma-separated value (`ids=84,1342`), not as repeated URL parameters (`ids=84&ids=1342` only returns the last value). Other filters still apply when ids is set — a conflicting language filter reduces results. The Zod input is `z.array(z.number())` and the service layer joins with commas. |
 | **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
 | **MIME-prefix discovery filter** | Format-key prefixes select a corpus before counts and pagination; readability flags still describe each returned edition's reader support. |
 | **Tri-state copyright discovery filter** | Corpus selection preserves copyrighted, public-domain-in-USA and unknown source classifications independently, without implying worldwide legal clearance. |
-| **`summary` as nullable, with the full `summaries` array alongside** | The AI-generated `summaries` array is a recent Gutendex addition absent on many older records. `summary` stays a nullable string — the first element if present — so the common single-summary read needs no array handling; `summaries` carries the complete set for the records that hold more than one, which reducing to the first element silently dropped. `content[]` lists only the entries beyond `summary` rather than repeating a multi-hundred-character paragraph. |
+| **`summary` as nullable, with the full `summaries` array alongside** | Source-provided summaries are sorted on the RDF mirror and retain upstream order on live fallback. `summary` is the first entry, not necessarily primary, or null when absent. `summaries` preserves the complete set; `content[]` lists entries beyond `summary` without repeating it. |
 | **`content[]` states absent fields rather than omitting them** | `structuredContent` carries `[]` and `null` verbatim, so a formatter that drops the line leaves a `content[]`-only client unable to distinguish a known-empty field from one the server never reported. Every collection and nullable in `gutenberg_get_book`, and the per-book subject list in `gutenberg_search_books`, therefore render unconditionally. Sentinel-based `format-parity` linting exercises one populated value per leaf and cannot catch value-dependent omission, so the empty states are covered by tests instead. |
 | **Refuse audio books explicitly** | Audio books have `media_type: "Sound"` and no literary text. Returning a readme file or an error without a clear message would confuse agents. The `audio_book` error contract gives a specific reason and recovery path. |
 | **Passage search is `find` on `gutenberg_get_text`, not a separate tool** | The scan runs over text the server already stores, adds no index, and a separate tool would repeat the fetch path. Callers jump to a quote or heading in one call instead of paging a novel in ~15. |
@@ -573,8 +577,8 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **`translator` is mirror-only and fails loudly without it** | Gutendex has no translator parameter. Dropping the filter on the live fallback would return an unfiltered list that looks like a match, so the call fails with `translator_requires_mirror` instead. |
 | **Two author-year bounds require one author to meet both** | A book-level OR over the stored extremes lets one author satisfy the start and another the end, which matches neither author's lifespan. The mirror checks per author; the live catalog cannot, and says so in a notice. |
 | **`languages` takes 2–3 letter catalog codes, with no off switch on the raised cap** | The catalog holds three-letter codes (`ang`, `enm`) the old two-character cap rejected. The raised cap only accepts input that was previously rejected and changes no existing call's result, so an off switch would add a mode with nothing to protect; exact matching stays, and a three-letter miss such as `eng` gets a notice that codes match exactly. |
-| **One wall-clock budget per upstream ladder, composed with `ctx.signal`** | The composed signal bounds in-flight attempts as well as retry backoff; the helper also normalizes exhausted ladders and preserves caller cancellation. The catalog gets 15s and the text mirror 35s, inside the default 60s client timeout. |
-| **Catalog attempts use the remaining 15s budget** | An uninterrupted slow response can succeed within the existing budget. Framework retry deadlines and attempt signals bound the ladder; fast failures still retry, cancellation stays cancellation, and the text mirror retains its 30s per-attempt ceiling and 35s total budget. |
+| **One 50s upstream allowance for a reading call, composed with `ctx.signal`** | The absolute allowance starts before metadata resolution, caps catalog network work at 15s, and gives text attempts and retries the remainder. Slow successful bodies can finish without a 30s attempt restart. Storage and synchronous extraction are not hard bounded; cancellation is preserved. |
+| **Standalone catalog calls retain a full 15s network budget** | Mirror and cache waits do not consume that budget unless the reader supplies its absolute deadline. Fast transient failures retry within the remaining allowance. Actual deadline expiry and exhausted transient retries retain distinct messages. |
 | **Upstream outages are declared contract reasons, not bubbled fetch errors** | `catalog_unavailable` (all four tools) and `text_fetch_failed` (`gutenberg_get_text`) carry a recovery hint to both `structuredContent.error.data` and the mirrored `content[]` text. Their messages name the catalog or the book rather than the resolved request URL, which embeds an operator-configured, overridable base URL. The original error stays on `cause` for server-side logs. A caller cancel is never relabelled — it is not an upstream outage, and advertising a retry for it would be wrong. |
 | **`GUTENDEX_BASE_URL` and `GUTENBERG_TEXT_BASE_URL` override env vars** | Gutendex is open-source and self-hostable; the project explicitly encourages it. Some deployers may also run Gutenberg mirrors. Overrides cost nothing to implement and unlock private/enterprise deployments. |
 
@@ -590,5 +594,5 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **HTML fallback quality** | Books fetched via the HTML fallback may include formatting artifacts from markup conversion. The `sourceFormat` field signals this so agents can note the limitation. |
 | **Gutendex page size capped at 32** | The Gutendex API returns at most 32 results per page with no `page_size` parameter. Agents needing more results must call `gutenberg_search_books` multiple times with incrementing `page` values. |
 | **Very large books** | War and Peace is ~3MB of stripped text, over 150 20,000-character chunks. The in-process cache holds this fine, but complete ingestion by an agent would require many sequential calls. This is a corpus property, not a server limitation — the chunking design exists specifically to handle it. |
-| **Gutenberg mirror latency** | The configured Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) can be slow, especially for less-popular books whose files are not in its cache. The 30-second fetch timeout and 24-hour text cache mitigate repeated latency. |
+| **Gutenberg mirror latency** | The configured content mirror can be slow. A shared 50s upstream allowance permits slow successful downloads, and the 24-hour text cache avoids repeated fetches. Eligible formats do not guarantee file existence; missing files retain `text_file_not_found`. |
 | **Gutendex API availability** | Gutendex is a community-run service, and cold queries routinely stall past its own gateway boundary. A ladder that exhausts its budget surfaces `catalog_unavailable` with a retry hint; the `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |

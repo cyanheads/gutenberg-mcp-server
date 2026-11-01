@@ -113,6 +113,27 @@ describe('withUpstreamDeadline — budget', () => {
 });
 
 describe('withUpstreamDeadline — classification', () => {
+  it('uses deadline wording only when time expired, including a zero remaining allowance', async () => {
+    vi.useFakeTimers();
+    const ctx = createMockContext();
+    const options = { ...OPTIONS, deadlineMessage: 'The download did not finish in time.' };
+    const run = vi.fn(async () => 'unexpected request');
+    await expect(withUpstreamDeadline(ctx, { ...options, budgetMs: 0 }, run)).rejects.toMatchObject(
+      { message: options.deadlineMessage },
+    );
+    expect(run).not.toHaveBeenCalled();
+    const early = timeout('retry backoff cannot fit', { reason: 'retry_deadline_exceeded' });
+    await expect(
+      withUpstreamDeadline(ctx, options, async () => {
+        throw early;
+      }),
+    ).rejects.toMatchObject({ message: OPTIONS.message, cause: early });
+    const pending = withUpstreamDeadline(ctx, options, stall).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    expect(await pending).toMatchObject({ message: options.deadlineMessage });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('normalizes an exhausted transient ladder, preserving the original as cause', async () => {
     const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
     const exhausted = timeout(

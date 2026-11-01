@@ -51,7 +51,7 @@ The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers 
 - Filters: `query` (title/author words), `topic`, `translator`, `languages` (catalog codes exactly as results report them, two or three letters: `en`, not `eng`), `author_year_start`/`author_year_end`, `ids`, `mime_type`, and `copyright` (`"true"`, `"false"`, `"null"`; false means public domain in the USA). Live fallback rejects queries over four words and the `translator` filter
 - With both author-year bounds, one author must meet both. The live fallback checks the bounds separately and says so in a notice
 - `sort` is `popular` (default) or `ascending`/`descending` by Gutenberg ID. Up to 32 books per page; use `totalCount` and `hasMore` to page
-- Each result carries `is_readable` (readable by `gutenberg_get_text`) and `has_plain_text`. Result rows omit translators; `gutenberg_get_book` reports them. Fails with `translator_requires_mirror`, `query_requires_mirror`, `page_out_of_range`, or `catalog_unavailable`
+- Each result carries `is_readable` (eligible Text formats; mirror file availability is not guaranteed) and `has_plain_text`. The local mirror ignores case and accents in query, translator and topic matching; live matching is upstream-defined. Result rows omit translators; `gutenberg_get_book` reports them. Fails with `translator_requires_mirror`, `query_requires_mirror`, `page_out_of_range`, or `catalog_unavailable`
 
 ---
 
@@ -94,7 +94,7 @@ Gutenberg-specific:
 
 Agent-friendly output:
 
-- `is_readable` on every search and browse result flags editions `gutenberg_get_text` can read
+- `is_readable` flags Text records with UTF-8 plain text, or HTML without audio formats; a missing mirror file still returns `text_file_not_found`
 - `offset`, `length`, `totalChars`, `remainingChars`, and `hasMore` support reliable sequential reads
 - `provenance` and `sourceFormat` on every text response cover attribution and fidelity
 

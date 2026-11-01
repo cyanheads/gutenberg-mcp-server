@@ -713,6 +713,7 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
 
     it('keeps the criteria line and notice on an empty result', async () => {
       mockGutendexService.searchBooks.mockResolvedValue({
+        source: 'live',
         books: [],
         totalCount: 0,
         hasMore: false,

@@ -42,6 +42,7 @@ const mockBook = {
 };
 
 const mockGutendexService = {
+  hasMirrorLanguages: vi.fn().mockResolvedValue(false),
   searchBooks: vi.fn(),
   getBook: vi.fn(),
 };
@@ -691,13 +692,12 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
       expect(result.structuredContent).toMatchObject({
         books: [],
         effectiveCriteria: { query: '*war*', sort: 'popular', page: 1 },
-        notice:
-          'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+        notice: 'No books matched these criteria. Broaden or remove the supplied filters: query.',
       });
       expect(readBack(contentText(result)).blocks.map((block) => block.text)).toEqual([
         '0 books found (page 1)',
         'Search criteria: {"query":"*war*","sort":"popular","page":1}',
-        'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+        'No books matched these criteria. Broaden or remove the supplied filters: query.',
       ]);
     });
   });

@@ -129,6 +129,37 @@ afterEach(async () => {
 });
 
 describe('complete mirror discovery', () => {
+  it('folds accents and mapped letters consistently through real mirror discovery', async () => {
+    const marked = 'Æ Œ Ø ß Ł Ð Þ É Σς';
+    const plain = 'ae oe o ss l d th e σσ';
+    await seed([
+      fixture(71, {
+        title: marked,
+        authors: [],
+        translators: [person(marked, null, null)],
+        subjects: [marked],
+        bookshelves: [],
+      }),
+    ]);
+    for (const field of ['query', 'translator', 'topic'] as const) {
+      for (const value of [marked, plain]) {
+        const result = await runToolContract(gutenbergSearchBooks, { [field]: value, ids: [71] });
+        expect(result.isError).toBeFalsy();
+        expect(bookIds(result)).toEqual([71]);
+        expect(result.structuredContent).toMatchObject({ totalCount: 1 });
+        expect(contentText(result)).toContain(marked);
+      }
+    }
+    for (const field of ['query', 'translator', 'topic'] as const) {
+      const empty = await runToolContract(gutenbergSearchBooks, { [field]: '\u0301', ids: [70] });
+      expect(bookIds(empty)).toEqual([70]);
+      expect(empty.structuredContent).toMatchObject({ effectiveCriteria: { ids: [70] } });
+      expect(JSON.stringify(empty.structuredContent)).not.toContain(`"${field}":`);
+    }
+    expect((await mirror.searchBooks({ query: '\u0301 elephant' })).total).toBe(69);
+    expect((await mirror.searchBooks({ topic: '\u0301 \u0301', ids: [70] })).total).toBe(1);
+    expect((await mirror.searchBooks({ query: 'elephant', page: 4 })).books).toEqual([]);
+  });
   it('executes browse continuation through later search pages without losing filters or books', async () => {
     for (const limit of [20, 32]) {
       const browse = await runToolContract(gutenbergBrowsePopular, {
@@ -278,7 +309,7 @@ describe('complete mirror discovery', () => {
     expect(result.books.map((book) => book.id)).toEqual(
       Array.from({ length: 32 }, (_, i) => i + 1),
     );
-    expect((await mirror.searchBooks({ query: 'elephant' })).total).toBe(0);
+    expect((await mirror.searchBooks({ query: 'elephant' })).total).toBe(69);
     expect((await mirror.searchBooks({ query: 'ÉLÉ åNG % _ modern tale absent' })).total).toBe(0);
     expect((await mirror.searchBooks({ topic: 'études' })).total).toBe(69);
     expect((await mirror.searchBooks({ topic: 'shelf phrase' })).total).toBe(69);
@@ -427,8 +458,6 @@ describe('complete mirror discovery', () => {
 describe('author-year bounds', () => {
   const LIVE_BOUNDS_CAVEAT =
     'The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound.';
-  const NO_MATCH =
-    'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.';
   const EMPTY_SELECTION =
     'The empty ID selection selects no books. Supply one or more IDs, or omit ids to search the catalog.';
   const scope = [301, 302, 303, 304, 305, 1430, 13725];
@@ -570,8 +599,9 @@ describe('author-year bounds', () => {
       author_year_start: 1500,
       author_year_end: 1500,
     });
-    expect(noticeOf(result)).toBe(`${LIVE_BOUNDS_CAVEAT} ${NO_MATCH}`);
-    expect(contentText(result)).toContain(`${LIVE_BOUNDS_CAVEAT} ${NO_MATCH}`);
+    const notice = `${LIVE_BOUNDS_CAVEAT} No books matched these criteria. Broaden or remove the supplied filters: author_year_start, author_year_end.`;
+    expect(noticeOf(result)).toBe(notice);
+    expect(contentText(result)).toContain(notice);
   });
 
   it('omits the caveat for one bound and when the mirror answers', async () => {
@@ -586,7 +616,9 @@ describe('author-year bounds', () => {
       author_year_start: 1800,
       author_year_end: 1800,
     });
-    expect(noticeOf(emptied)).toBe(NO_MATCH);
+    expect(noticeOf(emptied)).toBe(
+      'No books matched these criteria. Broaden or remove the supplied filters: author_year_start, author_year_end, ids. IDs that matched nothing under these filters: 1430.',
+    );
 
     vi.spyOn(mirror, 'ready').mockResolvedValue(false);
     answerLive([liveRecord]);
@@ -626,11 +658,92 @@ describe('author-year bounds', () => {
 });
 
 describe('catalog language codes', () => {
+  it('preserves an empty mirror answer when optional language diagnostics fail, without live I/O', async () => {
+    vi.spyOn(mirror, 'hasLanguages').mockRejectedValue(new Error('diagnostic failure'));
+    const result = await runToolContract(gutenbergSearchBooks, { languages: ['eng'] });
+    expect(result.isError).toBeFalsy();
+    expect(bookIds(result)).toEqual([]);
+    expect(noticeOf(result)).not.toContain('English');
+    expect(contentText(result)).not.toContain('English');
+    expect(http.calls).toHaveLength(0);
+  });
+  it('does no language diagnostic work on populated results or two-letter empty filters', async () => {
+    const diagnostic = vi.spyOn(mirror, 'hasLanguages');
+    await runToolContract(gutenbergSearchBooks, { languages: ['enm'] });
+    await runToolContract(gutenbergSearchBooks, { languages: ['xx'] });
+    await runToolContract(gutenbergBrowsePopular, {});
+    expect(diagnostic).not.toHaveBeenCalled();
+  });
+  it('keeps unmatched-ID guidance off incomplete and later pages', async () => {
+    const ids = [...Array.from({ length: 70 }, (_, index) => index + 1), 999999];
+    for (const page of [1, 2, 3]) {
+      const result = await runToolContract(gutenbergSearchBooks, { ids, page });
+      expect(result.isError).toBeFalsy();
+      expect(noticeOf(result)).toBeUndefined();
+    }
+  });
+  it('uses only continuation advice at the browse cap', async () => {
+    for (const limit of [31, 32, 100]) {
+      const result = await runToolContract(gutenbergBrowsePopular, { limit });
+      expect(result.isError).toBeFalsy();
+      expect(noticeOf(result)?.includes('Raise limit')).toBe(limit < 32);
+      expect(contentText(result)).toContain('gutenberg_search_books');
+      expect(result.structuredContent).toHaveProperty('continuation');
+    }
+  });
+  it('normalizes MIME type casing through the mirror and live source', async () => {
+    const input = { mime_type: 'TEXT/PLAIN', ids: [1] };
+    const local = await runToolContract(gutenbergSearchBooks, input);
+    expect(bookIds(local)).toEqual([1]);
+    expect(local.structuredContent).toHaveProperty('effectiveCriteria.mime_type', 'text/plain');
+    vi.spyOn(mirror, 'ready').mockResolvedValue(false);
+    answerLive([liveRecord]);
+    const live = await runToolContract(gutenbergSearchBooks, input);
+    expect(live.isError).toBeFalsy();
+    expect(new URL(http.calls[0]!.request.url).searchParams.get('mime_type')).toBe('text/plain');
+  });
+  it('composes the accent hint only for an empty live ASCII query', async () => {
+    vi.spyOn(mirror, 'ready').mockResolvedValue(false);
+    answerLive([]);
+    const ascii = await runToolContract(gutenbergSearchBooks, {
+      query: 'moliere',
+      languages: ['eng'],
+    });
+    expect(noticeOf(ascii)).toContain('may require accents');
+    expect(noticeOf(ascii)?.match(/may require accents/gu)).toHaveLength(1);
+    expect(contentText(ascii)).toContain('may require accents');
+    const accented = await runToolContract(gutenbergSearchBooks, { query: 'molière' });
+    expect(noticeOf(accented)).not.toContain('may require accents');
+  });
+  it('does not suspect a known three-letter code when another filter excludes its books', async () => {
+    const result = await runToolContract(gutenbergSearchBooks, {
+      languages: ['enm'],
+      topic: 'absent',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(noticeOf(result)).not.toContain('English');
+    expect(noticeOf(result)).not.toContain('query');
+    expect(contentText(result)).toContain('topic');
+  });
+  it('reports unmatched filtered IDs only for a complete first page', async () => {
+    const result = await runToolContract(gutenbergSearchBooks, { ids: [1, 999999] });
+    expect(noticeOf(result)).toContain('999999');
+    expect(contentText(result)).toContain('999999');
+  });
+  it.each(['fr,de', 'zh-CN', 'English'])(
+    'explains invalid language %s on both tools',
+    async (code) => {
+      for (const tool of [gutenbergSearchBooks, gutenbergBrowsePopular]) {
+        const result = await runToolContract(tool, { languages: [code] });
+        expect(contentText(result)).toContain('Pass several codes as separate items.');
+      }
+    },
+  );
   const EXACT_CODES = 'Language codes match exactly: English is "en", not "eng".';
   const NO_SEARCH_MATCH =
-    'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.';
+    'No books matched these criteria. Broaden or remove the supplied filters: languages.';
   const NO_BROWSE_MATCH =
-    'No books matched these criteria. Try a broader topic or remove a language, format, or copyright filter.';
+    'No books matched these criteria. Broaden or remove the supplied filters: languages.';
 
   beforeEach(() =>
     seed([
@@ -720,7 +833,7 @@ describe('catalog language codes', () => {
       author_year_end: 1899,
     });
     expect(noticeOf(result)).toBe(
-      `The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound. ${NO_SEARCH_MATCH} ${EXACT_CODES}`,
+      `The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound. No books matched these criteria. Broaden or remove the supplied filters: languages, author_year_start, author_year_end. ${EXACT_CODES}`,
     );
   });
 
@@ -796,9 +909,9 @@ describe('translator filter', () => {
   it.each([
     ['maude', [2600]],
     ['garnett', [1399, 2554]],
-    ['édouard', [17509]],
-    ['ÉDOUARD', [17509]],
-    ['edouard', [69566]],
+    ['édouard', [17509, 69566]],
+    ['ÉDOUARD', [17509, 69566]],
+    ['edouard', [17509, 69566]],
     ['louise aylmer', [2600]],
     ['maude garnett', []],
     ['aude, Lou', [2600]],
@@ -835,7 +948,7 @@ describe('translator filter', () => {
     const empty = await runToolContract(gutenbergSearchBooks, { translator: 'nobody' });
     expect(empty.isError).toBeFalsy();
     expect(noticeOf(empty)).toBe(
-      'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
+      'No books matched these criteria. Broaden or remove the supplied filters: translator.',
     );
     // @ts-expect-error Exercise invalid wire arguments through the production schema boundary.
     const invalid = await runToolContract(gutenbergSearchBooks, { translator: {} });

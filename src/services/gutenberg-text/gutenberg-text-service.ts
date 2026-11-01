@@ -13,22 +13,16 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { SAXParser } from 'parse5-sax-parser';
 import type { ServerConfig } from '@/config/server-config.js';
+import { bestEffortCache } from '@/services/best-effort-cache.js';
 import { type Book, foldSearchText } from '@/services/gutendex/types.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
 import type { CachedText, FetchedText, PassageMatch, SourceFormat, TextChunk } from './types.js';
 
 /**
- * Per-attempt ceiling for one mirror file request. Books are whole files —
- * multi-megabyte texts legitimately take tens of seconds — so this stays
- * generous and the ladder budget below is what bounds the exchange.
+ * Default upstream allowance for direct service callers. The tool supplies an
+ * absolute deadline that also includes its preceding catalog lookup.
  */
-const TEXT_TIMEOUT_MS = 30_000;
-/**
- * Wall-clock ceiling for a whole mirror ladder, aborting any request still in
- * flight. Sized so a catalog hop plus a text hop still finishes inside the 60 s
- * default MCP client request timeout with headroom to spare.
- */
-const TEXT_BUDGET_MS = 35_000;
+export const READING_UPSTREAM_BUDGET_MS = 50_000;
 const TEXT_TTL_SECONDS = 86_400; // 24 hours
 
 /** Regex matching the START marker (multiline, case from real files). */
@@ -272,23 +266,27 @@ export class GutenbergTextService {
     id: number,
     format: SourceFormat,
     ctx: Context,
+    budgetMs: number,
   ): Promise<string> {
     const response = await withUpstreamDeadline(
       ctx,
       {
-        budgetMs: TEXT_BUDGET_MS,
-        message: `Failed to fetch text for book ${id}: the Gutenberg mirror did not respond.`,
+        budgetMs,
+        message: `Failed to fetch text for book ${id}: the Gutenberg mirror remained temporarily unavailable.`,
+        deadlineMessage: `The Gutenberg text download for book ${id} did not finish in time.`,
         reason: 'text_fetch_failed',
       },
       (signal) =>
         withRetry(
-          async () => {
+          async ({ signal: attemptSignal, remainingMs }) => {
             const reqCtx = requestContextService.createRequestContext({
               parentContext: ctx,
               operation: 'GutenbergTextService.fetchRaw',
             });
             try {
-              const response = await fetchWithTimeout(url, TEXT_TIMEOUT_MS, reqCtx, { signal });
+              const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
+                signal: attemptSignal,
+              });
               const buffer = await response.arrayBuffer();
               return {
                 raw: new TextDecoder('utf-8').decode(buffer),
@@ -323,6 +321,7 @@ export class GutenbergTextService {
           {
             operation: 'GutenbergTextService.fetchRaw',
             baseDelayMs: 2000,
+            deadlineMs: budgetMs,
             signal,
           },
         ),
@@ -398,7 +397,12 @@ export class GutenbergTextService {
    * Throws no_text_format if no usable format; `fetchRaw` throws text_fetch_failed
    * when the mirror ladder exhausts its budget.
    */
-  async fetchAndCacheText(book: Book, id: number, ctx: Context): Promise<CachedText> {
+  async fetchAndCacheText(
+    book: Book,
+    id: number,
+    ctx: Context,
+    deadlineAtMs = Date.now() + READING_UPSTREAM_BUDGET_MS,
+  ): Promise<CachedText> {
     const cacheKey = `gutenberg/text/v3/${id}`;
 
     const cached = await ctx.state.get<CachedText>(cacheKey);
@@ -422,11 +426,15 @@ export class GutenbergTextService {
      */
     ctx.log.info('Fetching book text', { id, format: resolved.format });
 
-    // fetchRaw owns the text_fetch_failed translation. Keeping it there rather
-    // than in a catch here leaves the two ctx.state cache operations around this
-    // call outside the failure class — a storage error bubbles as itself instead
-    // of being relabelled an upstream outage.
-    const raw = await this.fetchRaw(resolved.url, id, resolved.format, ctx);
+    // Storage reads remain failures of their own; rejected cache writes below
+    // are best effort. Neither is classified as an upstream outage.
+    const raw = await this.fetchRaw(
+      resolved.url,
+      id,
+      resolved.format,
+      ctx,
+      Math.max(0, deadlineAtMs - Date.now()),
+    );
 
     const processed = this.processRaw(raw, resolved.format);
 
@@ -447,7 +455,7 @@ export class GutenbergTextService {
       title: book.title,
     };
 
-    await ctx.state.set(cacheKey, entry, { ttl: TEXT_TTL_SECONDS });
+    await bestEffortCache(ctx, cacheKey, entry, TEXT_TTL_SECONDS);
     return entry;
   }
 

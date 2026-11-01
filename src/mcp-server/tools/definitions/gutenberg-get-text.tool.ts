@@ -7,7 +7,10 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
-import { getGutenbergTextService } from '@/services/gutenberg-text/gutenberg-text-service.js';
+import {
+  getGutenbergTextService,
+  READING_UPSTREAM_BUDGET_MS,
+} from '@/services/gutenberg-text/gutenberg-text-service.js';
 import type { PassageMatch } from '@/services/gutenberg-text/types.js';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 
@@ -39,7 +42,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       .min(1)
       .default(20000)
       .describe(
-        'Requested maximum characters. Default 20,000 (~4–5 pages of prose); requests above 50,000 are capped locally at 50,000. Paragraph-boundary trimming may return less than the applied limit — use length for continuation. Trimming never cuts before a find match ends.',
+        'Requested maximum characters. Default 20,000; requests above 50,000 are capped locally at 50,000. Paragraph-boundary trimming may return less than the applied limit — use length for continuation. Trimming never cuts before a find match ends.',
       ),
     find: z
       .string()
@@ -151,9 +154,9 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'no_text_format',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an older ASCII-only entry).',
+      when: 'The book has no UTF-8 plain-text or HTML edition available to read (for example an ASCII-only or PDF/TeX-only entry).',
       recovery:
-        'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, ASCII-only, or other formats this server cannot read as text.',
+        'Call gutenberg_get_book to inspect the available formats. The book may only exist as EPUB, PDF/TeX, ASCII-only, or other formats this server cannot read as text.',
     },
     {
       reason: 'offset_out_of_range',
@@ -172,7 +175,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'text_fetch_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Gutenberg mirror had a transient failure or did not respond within the request budget.',
+      when: 'The Gutenberg mirror had a transient failure or the download did not finish within the remaining upstream allowance.',
       recovery:
         'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
@@ -183,18 +186,19 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The catalog lookup that precedes reading a book did not answer within the time this server allows.',
       recovery:
-        'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry in a few seconds, or call gutenberg_get_book to confirm the catalog is answering again.',
+        'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry later, or call gutenberg_get_book to confirm the catalog is answering again.',
       retryable: true,
       thrownBy: 'service',
     },
   ],
 
   async handler(input, ctx) {
+    const deadlineAtMs = Date.now() + READING_UPSTREAM_BUDGET_MS;
     ctx.log.info('Fetching book text', { id: input.id, offset: input.offset, limit: input.limit });
 
     // Step 1: Fetch book metadata to validate media_type and resolve format URL
     const book = await getGutendexService()
-      .getBook(input.id, ctx)
+      .getBook(input.id, ctx, deadlineAtMs)
       .catch((err: unknown) => {
         if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
           throw ctx.fail('not_found', `No book found with Gutenberg ID ${input.id}.`);
@@ -225,7 +229,12 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     }
 
     // Step 2: Fetch and cache the full stripped text (or retrieve from cache)
-    const cached = await getGutenbergTextService().fetchAndCacheText(book, input.id, ctx);
+    const cached = await getGutenbergTextService().fetchAndCacheText(
+      book,
+      input.id,
+      ctx,
+      deadlineAtMs,
+    );
 
     // Guard: offset past end of book
     if (input.offset >= cached.text.length) {

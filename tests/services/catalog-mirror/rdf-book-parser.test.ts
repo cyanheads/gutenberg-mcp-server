@@ -166,6 +166,36 @@ describe('parseBookRdf — field mapping', () => {
   });
 });
 
+describe('catalog title normalization', () => {
+  it.each([
+    ['Peter Pan : $b [Peter and Wendy]', 'Peter Pan: [Peter and Wendy]'],
+    ['Title ; $b subtitle', 'Title; subtitle'],
+    ['Title = $b parallel', 'Title = parallel'],
+    ['Title $b: subtitle', 'Title: subtitle'],
+    ['Title : $ subtitle', 'Title: subtitle'],
+    ['Title $b subtitle $c contributor $v volume', 'Title: subtitle: contributor: volume'],
+    ['Title\n$b subtitle', 'Title: subtitle'],
+  ])('normalizes reserved markers in %s', (title, expected) => {
+    expect(
+      parseBookRdf(
+        `<rdf:RDF><pgterms:ebook><dcterms:title>${title}</dcterms:title></pgterms:ebook></rdf:RDF>`,
+        1,
+      )?.title,
+    ).toBe(expected);
+  });
+  it.each(['The $30,000 Bequest, and Other Stories', 'A $ price', 'Costs $5 and $10'])(
+    'preserves literal dollars in %s',
+    (title) => {
+      expect(
+        parseBookRdf(
+          `<rdf:RDF><pgterms:ebook><dcterms:title>${title}</dcterms:title></pgterms:ebook></rdf:RDF>`,
+          1,
+        )?.title,
+      ).toBe(title);
+    },
+  );
+});
+
 describe('parseBookRdf — malformed input', () => {
   it('returns null for a document with no ebook element', () => {
     const empty =
@@ -217,7 +247,11 @@ describe('parseBookRdf — parity with the live Gutendex record', () => {
       >;
       const mine = parse(id) as unknown as Record<string, unknown>;
       for (const field of Object.keys(live)) {
-        expect(sortDeep(mine[field]), `field ${field}`).toEqual(sortDeep(live[field]));
+        const expected =
+          field === 'title' && id === 10056
+            ? 'Chinese literature: Comprising the Analects of Confucius, the Sayings of Mencius, the Shi-King, the Travels of Fâ-Hien, and the Sorrows of Han'
+            : live[field];
+        expect(sortDeep(mine[field]), `field ${field}`).toEqual(sortDeep(expected));
       }
     },
   );

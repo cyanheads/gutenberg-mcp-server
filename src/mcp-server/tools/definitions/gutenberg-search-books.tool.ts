@@ -12,7 +12,8 @@ import { normalizeSearchParams } from '@/services/gutendex/types.js';
 import {
   discoveryCriteria,
   discoveryFilters,
-  withLanguageCodeHint,
+  discoveryNotice,
+  LANGUAGE_CODE_MESSAGE,
 } from '../discovery-criteria.js';
 
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
@@ -28,22 +29,22 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       .string()
       .optional()
       .describe(
-        'Every nonblank whitespace-separated word must match title or author name as a case-insensitive literal substring. More than four words require the local mirror; live fallback rejects longer queries. Example: "dickens expectations" matches Great Expectations.',
+        'Every nonblank whitespace-separated word must match title or author name as a literal substring. The local mirror ignores case and accents; live fallback may require accents and rejects more than four words. Example: "dickens expectations" matches Great Expectations.',
       ),
     topic: z
       .string()
       .optional()
       .describe(
-        'Case-insensitive phrase to match against subjects and bookshelves. Example: "detective" returns books on the "Detective and Mystery Stories" bookshelf. Separate from query — topic searches categorization metadata, not title/author.',
+        'Phrase to match against subjects and bookshelves, ignoring case and, on the local mirror, accents. Example: "detective" matches the "Detective Fiction" bookshelf and "Detective and mystery stories" subject. Separate from query — topic searches categorization metadata, not title/author.',
       ),
     translator: z
       .string()
       .optional()
       .describe(
-        'Every nonblank whitespace-separated word must match a translator name as a case-insensitive literal substring; words can land on different translators of one book, and accents must match. Requires the local mirror. Example: "maude" finds the Aylmer and Louise Maude translations. Result rows omit translators; gutenberg_get_book reports them.',
+        'Every nonblank whitespace-separated word must match a translator name as a literal substring, ignoring case and accents; words can land on different translators of one book. Requires the local mirror. Example: "maude" finds the Aylmer and Louise Maude translations. Result rows omit translators; gutenberg_get_book reports them.',
       ),
     languages: z
-      .array(z.string().min(2).max(3))
+      .array(z.string().min(2).max(3, LANGUAGE_CODE_MESSAGE))
       .optional()
       .describe(
         'Filter to books in any of these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English, ["fr", "de"] for French or German, ["enm"] for Middle English.',
@@ -125,7 +126,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
             is_readable: z
               .boolean()
               .describe(
-                'True for non-Sound records with UTF-8 plain text or HTML supported by gutenberg_get_text.',
+                'Eligible Text record with UTF-8 plain text, or HTML without audio formats. Does not guarantee the mirror file exists.',
               ),
           })
           .describe('Book entry.'),
@@ -183,7 +184,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The Project Gutenberg catalog did not answer within the time this server allows for one search.',
       recovery:
-        'The catalog is unreachable or too slow right now. Retry in a few seconds; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
+        'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -229,28 +230,8 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       throw err;
     });
 
-    /** `notice` holds one value and the last write wins, so this call composes every sentence. */
-    const notices: string[] = [];
-    if (
-      result.source === 'live' &&
-      criteria.author_year_start !== undefined &&
-      criteria.author_year_end !== undefined
-    ) {
-      notices.push(
-        'The live catalog answered, so author_year_start and author_year_end were checked separately: one author can satisfy each bound.',
-      );
-    }
-    if (result.books.length === 0) {
-      notices.push(
-        input.ids?.length === 0
-          ? 'The empty ID selection selects no books. Supply one or more IDs, or omit ids to search the catalog.'
-          : withLanguageCodeHint(
-              'No books matched these criteria. Try fewer query words, a broader topic, or remove a filter.',
-              criteria.languages,
-            ),
-      );
-    }
-    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    const notice = await discoveryNotice(criteria, result, ctx);
+    if (notice) ctx.enrich.notice(notice);
 
     return {
       books: result.books.map((b) => ({

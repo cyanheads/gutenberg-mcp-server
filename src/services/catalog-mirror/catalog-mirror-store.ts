@@ -12,7 +12,13 @@
  */
 
 import type { MirrorRow, SqliteMirrorStoreSpec } from '@cyanheads/mcp-ts-core/mirror';
-import { type Book, foldSearchText, isReadable, type Person } from '@/services/gutendex/types.js';
+import {
+  type Book,
+  foldCatalogText,
+  isReadable,
+  normalizeTitle,
+  type Person,
+} from '@/services/gutendex/types.js';
 
 /** Primary table holding one row per Gutenberg book. */
 export const CATALOG_TABLE = 'books';
@@ -91,7 +97,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: CATALOG_TABLE,
     primaryKey: 'id',
-    version: 4,
+    version: 5,
     migrations: [
       {
         version: 2,
@@ -188,6 +194,63 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
           db.exec(updateTrigger);
         },
       },
+      {
+        version: 5,
+        up(db) {
+          const titles = db.prepare<Pick<CatalogBookRow, 'id' | 'title'>>(
+            'SELECT id,title FROM books WHERE id > ? ORDER BY id LIMIT 500',
+          );
+          const writeTitle = db.prepare('UPDATE books SET title=? WHERE id=?');
+          let after = 0;
+          for (;;) {
+            const rows = titles.all(after);
+            if (rows.length === 0) break;
+            for (const row of rows) {
+              const title = normalizeTitle(row.title);
+              if (title !== row.title) writeTitle.run(title, row.id);
+              after = row.id;
+            }
+          }
+          /** Titles must reach FTS before folded-only writes suspend its UPDATE trigger. */
+          const { sql: updateTrigger } = db
+            .prepare<{ sql: string }>(
+              "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='books_au'",
+            )
+            .get() as { sql: string };
+          db.exec('DROP TRIGGER books_au');
+          const read = db.prepare<CatalogBookRow>(
+            'SELECT id,title,authors,subjects,bookshelves,translators,translators_folded FROM books WHERE id > ? ORDER BY id LIMIT 500',
+          );
+          const write = db.prepare(
+            'UPDATE books SET title_folded=?,authors_folded=?,subjects_folded=?,bookshelves_folded=?,translators_folded=? WHERE id=?',
+          );
+          after = 0;
+          for (;;) {
+            const rows = read.all(after);
+            if (rows.length === 0) break;
+            for (const row of rows) {
+              const folded = foldedFields(
+                row.title,
+                JSON.parse(row.authors) as Person[],
+                JSON.parse(row.subjects) as string[],
+                JSON.parse(row.bookshelves) as string[],
+              );
+              write.run(
+                folded.title_folded,
+                folded.authors_folded,
+                folded.subjects_folded,
+                folded.bookshelves_folded,
+                row.translators_folded === null
+                  ? null
+                  : foldedNames(JSON.parse(row.translators) as Person[]),
+                row.id,
+              );
+              after = row.id;
+            }
+          }
+          db.exec(updateTrigger);
+        },
+      },
     ],
     columns: {
       id: 'INTEGER',
@@ -226,16 +289,16 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
 
 /** A people list's folded names, as JSON. */
 function foldedNames(people: Person[]): string {
-  return JSON.stringify(people.map((person) => foldSearchText(person.name)));
+  return JSON.stringify(people.map((person) => foldCatalogText(person.name)));
 }
 
 /** Unicode case conversion is done at ingest, since SQLite LOWER only folds ASCII. */
 function foldedFields(title: string, authors: Person[], subjects: string[], bookshelves: string[]) {
   return {
-    title_folded: foldSearchText(title),
+    title_folded: foldCatalogText(title),
     authors_folded: foldedNames(authors),
-    subjects_folded: JSON.stringify(subjects.map(foldSearchText)),
-    bookshelves_folded: JSON.stringify(bookshelves.map(foldSearchText)),
+    subjects_folded: JSON.stringify(subjects.map(foldCatalogText)),
+    bookshelves_folded: JSON.stringify(bookshelves.map(foldCatalogText)),
   };
 }
 

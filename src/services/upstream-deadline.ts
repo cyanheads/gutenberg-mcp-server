@@ -25,6 +25,8 @@ const TRANSIENT_CODES: ReadonlySet<number> = new Set([
 export interface UpstreamDeadlineOptions {
   /** Wall-clock ceiling for the whole ladder, in milliseconds. */
   budgetMs: number;
+  /** Distinct wording when the actual allowance expires, rather than fast failures. */
+  deadlineMessage?: string;
   /**
    * Client-facing message. Must name the upstream or the record in domain terms —
    * never a resolved request URL or a configured base URL, both of which are
@@ -51,9 +53,10 @@ export interface UpstreamDeadlineOptions {
  */
 export async function withUpstreamDeadline<T>(
   ctx: Context,
-  { budgetMs, message, reason }: UpstreamDeadlineOptions,
+  { budgetMs, message, deadlineMessage = message, reason }: UpstreamDeadlineOptions,
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
+  const deadlineAtMs = Date.now() + budgetMs;
   const deadline = new AbortController();
   /**
    * Abort with a held exception rather than a string: `fetch` and `withRetry`'s
@@ -68,13 +71,23 @@ export async function withUpstreamDeadline<T>(
   const timer = setTimeout(() => deadline.abort(deadlineReason), budgetMs);
 
   try {
+    if (budgetMs <= 0) {
+      deadline.abort(deadlineReason);
+      ctx.signal.throwIfAborted();
+      throw deadlineReason;
+    }
     return await run(AbortSignal.any([deadline.signal, ctx.signal]));
   } catch (err: unknown) {
     if (ctx.signal.aborted) throw err;
     const exhausted =
       deadline.signal.aborted || (err instanceof McpError && TRANSIENT_CODES.has(err.code));
     if (!exhausted) throw err;
-    throw serviceUnavailable(message, { reason, ...ctx.recoveryFor(reason) }, { cause: err });
+    const timedOut = deadline.signal.aborted || Date.now() >= deadlineAtMs;
+    throw serviceUnavailable(
+      timedOut ? deadlineMessage : message,
+      { reason, ...ctx.recoveryFor(reason) },
+      { cause: err },
+    );
   } finally {
     clearTimeout(timer);
   }

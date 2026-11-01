@@ -30,6 +30,110 @@ function parse(id: number): Book {
 }
 
 describe('catalogStoreSpec', () => {
+  it('migrates v4 titles and all folds in bounded batches, keeping null translators and FTS current', async () => {
+    const dir = mkdtempSync(join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-v5-'));
+    const path = join(dir, 'v4.sqlite');
+    const old = sqliteMirrorStore({ ...catalogStoreSpec(path), version: 4, migrations: [] });
+    const base = rowFromBook({
+      ...parse(84),
+      title: 'Peter Pan : $b Édition',
+      authors: [{ name: 'Molière', birth_year: null, death_year: null }],
+      subjects: ['Œuvres'],
+      bookshelves: ['Über'],
+      translators: [{ name: 'Édouard', birth_year: null, death_year: null }],
+    });
+    await old.applyBatch(
+      Array.from({ length: 1001 }, (_, i) => ({
+        ...base,
+        id: i + 1,
+        title_folded: 'legacy',
+        authors_folded: '["legacy"]',
+        subjects_folded: '["legacy"]',
+        bookshelves_folded: '["legacy"]',
+        translators_folded: i === 1000 ? null : '["legacy"]',
+      })),
+      [],
+    );
+    await old.writeState({ status: 'error', cursor: 'stamp|1001', total: 1001 });
+    const before = await old.readState();
+    (await old.raw()).exec(
+      "CREATE TRIGGER assert_title_fts BEFORE UPDATE OF title ON books BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='books_au') THEN RAISE(ABORT, 'title requires FTS trigger') END; END; CREATE TRIGGER assert_folded_fts BEFORE UPDATE OF title_folded ON books BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE name='books_au') THEN RAISE(ABORT, 'folded rewrite must suspend FTS trigger') END; END;",
+    );
+    await old.close();
+    const store = sqliteMirrorStore(catalogStoreSpec(path));
+    try {
+      const db = await store.raw();
+      db.exec('DROP TRIGGER assert_title_fts; DROP TRIGGER assert_folded_fts');
+      expect(
+        db
+          .prepare(
+            'SELECT DISTINCT title,title_folded,authors_folded,subjects_folded,bookshelves_folded FROM books',
+          )
+          .all(),
+      ).toEqual([
+        {
+          title: 'Peter Pan: Édition',
+          title_folded: 'peter pan: edition',
+          authors_folded: '["moliere"]',
+          subjects_folded: '["oeuvres"]',
+          bookshelves_folded: '["uber"]',
+        },
+      ]);
+      expect(db.prepare('SELECT translators_folded FROM books WHERE id=1001').get()).toEqual({
+        translators_folded: null,
+      });
+      expect(db.prepare('SELECT translators_folded FROM books WHERE id=1').get()).toEqual({
+        translators_folded: '["edouard"]',
+      });
+      expect(await store.readState()).toEqual(before);
+      expect((await store.query({ match: 'b', limit: 1, offset: 0 })).total).toBe(0);
+      expect((await store.query({ match: 'Pan', limit: 1, offset: 0 })).total).toBe(1001);
+      await store.applyBatch([{ ...base, id: 1, title: 'Updated title' }], []);
+      expect((await store.query({ match: 'Updated', limit: 1, offset: 0 })).total).toBe(1);
+      expect((await store.integrityCheck()).ok).toBe(true);
+    } finally {
+      await store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('rolls v5 title, FTS and trigger changes back when a later folded batch fails', async () => {
+    const dir = mkdtempSync(
+      join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-v5-rollback-'),
+    );
+    const path = join(dir, 'v4.sqlite');
+    const spec = { ...catalogStoreSpec(path), version: 4, migrations: [] };
+    const old = sqliteMirrorStore(spec);
+    const row = { ...rowFromBook(parse(84)), title: 'Title : $b subtitle' };
+    await old.applyBatch(
+      Array.from({ length: 501 }, (_, i) => ({
+        ...row,
+        id: i + 1,
+        authors: i === 500 ? 'not-json' : row.authors,
+      })),
+      [],
+    );
+    await old.close();
+    const failing = sqliteMirrorStore(catalogStoreSpec(path));
+    await expect(failing.raw()).rejects.toMatchObject({
+      code: -32010,
+      data: { recovery: { hint: expect.any(String) } },
+    });
+    await failing.close();
+    const recovered = sqliteMirrorStore(spec);
+    try {
+      const db = await recovered.raw();
+      expect(db.prepare('SELECT DISTINCT title FROM books').all()).toEqual([
+        { title: 'Title : $b subtitle' },
+      ]);
+      expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 4 }]);
+      expect((await recovered.query({ match: 'b', limit: 1, offset: 0 })).total).toBe(501);
+      await recovered.applyBatch([{ ...row, id: 1, title: 'Recovered title' }], []);
+      expect((await recovered.query({ match: 'Recovered', limit: 1, offset: 0 })).total).toBe(1);
+    } finally {
+      await recovered.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('backfills Unicode search columns across multiple legacy batches without a harvest', async () => {
     const dir = mkdtempSync(
       join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-discovery-migration-'),
@@ -79,10 +183,10 @@ describe('catalogStoreSpec', () => {
       expect(rows).toHaveLength(1001);
       for (const row of rows)
         expect(row).toMatchObject({
-          title_folded: 'éléphant % _',
-          authors_folded: '["ångström"]',
-          subjects_folded: '["études"]',
-          bookshelves_folded: '["über bücher"]',
+          title_folded: 'elephant % _',
+          authors_folded: '["angstrom"]',
+          subjects_folded: '["etudes"]',
+          bookshelves_folded: '["uber bucher"]',
         });
       expect((await upgraded.readState()).completedAt).toBe('2026-10-01T00:00:00.000Z');
       expect((await upgraded.integrityCheck()).ok).toBe(true);
@@ -217,9 +321,9 @@ describe('catalogStoreSpec', () => {
                 'SELECT DISTINCT translators_folded FROM books WHERE translators_folded IS NOT NULL',
               )
               .all(),
-          ).toEqual([{ translators_folded: '["grenier, édouard","maude, louise"]' }]);
+          ).toEqual([{ translators_folded: '["grenier, edouard","maude, louise"]' }]);
           expect(await store.readState()).toEqual(before);
-          expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 4 }]);
+          expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 5 }]);
           expect((await store.integrityCheck()).ok).toBe(true);
 
           for (const translator of ['ÉDOUARD', 'louise grenier']) {
@@ -290,7 +394,7 @@ describe('catalogStoreSpec', () => {
       try {
         expect(await columnNames(store)).toContain('translators_folded');
         const db = await store.raw();
-        expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 4 }]);
+        expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 5 }]);
         expect(await updateTrigger(store)).toHaveLength(1);
         await store.applyBatch([rowFromBook(parse(1399))], []);
         const { rows } = await store.query({ limit: 1, offset: 0 });
@@ -413,6 +517,18 @@ describe('catalogStoreSpec', () => {
 });
 
 describe('rowFromBook / bookFromRow', () => {
+  it.each([
+    ['StillImage', { 'text/plain; charset=utf-8': 'x' }, false],
+    ['Text', { 'text/html': 'x', 'audio/mpeg': 'y' }, false],
+    ['Text', { 'text/plain; charset=utf-8': 'x', 'audio/mpeg': 'y' }, true],
+    ['Text', { 'text/html': 'x' }, true],
+  ] as const)(
+    'derives %s format eligibility on existing stored rows',
+    (media_type, formats, expected) => {
+      const row = { ...rowFromBook(parse(84)), media_type, formats: JSON.stringify(formats) };
+      expect(bookFromRow(row).is_readable).toBe(expected);
+    },
+  );
   it('derives readability from legacy formats without requiring a harvest', () => {
     const legacy = {
       ...rowFromBook(parse(84)),
@@ -458,7 +574,7 @@ describe('rowFromBook / bookFromRow', () => {
         { name: 'ΟΣΑΣ', birth_year: null, death_year: null },
       ],
     };
-    expect(rowFromBook(book).translators_folded).toBe('["grenier, édouard","οσασ"]');
+    expect(rowFromBook(book).translators_folded).toBe('["grenier, edouard","οσασ"]');
     expect(bookFromRow(rowFromBook(book))).toEqual(book);
   });
 
