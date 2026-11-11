@@ -27,6 +27,32 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "GUTENDEX_BASE_URL",
+          "description": "Gutendex catalog API base URL, used for search and popularity browse when the local catalog mirror cannot answer. Leave blank for the public instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://gutendex.com/books/"
+        },
+        {
+          "name": "GUTENBERG_TEXT_BASE_URL",
+          "description": "Project Gutenberg content mirror serving the /cache/epub tree: book text, the bulk catalog archive, and per-book catalog records. Leave blank for gutenberg.pglaf.org.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://gutenberg.pglaf.org"
+        },
+        {
+          "name": "GUTENBERG_MIRROR_PATH",
+          "description": "Path to the local catalog-mirror SQLite file. Leave blank to use the per-user default that gutenberg-mcp-server mirror init builds.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "GUTENBERG_MIRROR_REFRESH_CRON",
+          "description": "Cron schedule for an in-process catalog-mirror refresh, e.g. 0 4 * * *; on an empty mirror the first run is the full harvest. Leave blank to disable.",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
@@ -80,6 +106,32 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "GUTENDEX_BASE_URL",
+          "description": "Gutendex catalog API base URL, used for search and popularity browse when the local catalog mirror cannot answer. Leave blank for the public instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://gutendex.com/books/"
+        },
+        {
+          "name": "GUTENBERG_TEXT_BASE_URL",
+          "description": "Project Gutenberg content mirror serving the /cache/epub tree: book text, the bulk catalog archive, and per-book catalog records. Leave blank for gutenberg.pglaf.org.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://gutenberg.pglaf.org"
+        },
+        {
+          "name": "GUTENBERG_MIRROR_PATH",
+          "description": "Path to the local catalog-mirror SQLite file. Leave blank to use the per-user default that gutenberg-mcp-server mirror init builds.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "GUTENBERG_MIRROR_REFRESH_CRON",
+          "description": "Cron schedule for an in-process catalog-mirror refresh, e.g. 0 4 * * *; on an empty mirror the first run is the full harvest. Leave blank to disable.",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {

@@ -4,6 +4,12 @@
     "args": ["-y", "@cyanheads/gutenberg-mcp-server"],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
-    }
+    },
+    "env_vars": [
+      "GUTENDEX_BASE_URL",
+      "GUTENBERG_TEXT_BASE_URL",
+      "GUTENBERG_MIRROR_PATH",
+      "GUTENBERG_MIRROR_REFRESH_CRON"
+    ]
   }
 }

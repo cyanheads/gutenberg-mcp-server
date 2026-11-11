@@ -17,8 +17,42 @@
       "command": "npx",
       "args": ["-y", "@cyanheads/gutenberg-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "GUTENDEX_BASE_URL": "${user_config.GUTENDEX_BASE_URL}",
+        "GUTENBERG_TEXT_BASE_URL": "${user_config.GUTENBERG_TEXT_BASE_URL}",
+        "GUTENBERG_MIRROR_PATH": "${user_config.GUTENBERG_MIRROR_PATH}",
+        "GUTENBERG_MIRROR_REFRESH_CRON": "${user_config.GUTENBERG_MIRROR_REFRESH_CRON}"
       }
+    }
+  },
+  "userConfig": {
+    "GUTENDEX_BASE_URL": {
+      "type": "string",
+      "title": "Gutendex base URL",
+      "description": "Gutendex catalog API base URL, used for search and popularity browse when the local catalog mirror cannot answer. Leave blank for the public instance.",
+      "required": false,
+      "default": ""
+    },
+    "GUTENBERG_TEXT_BASE_URL": {
+      "type": "string",
+      "title": "Gutenberg content mirror URL",
+      "description": "Project Gutenberg content mirror serving the /cache/epub tree: book text, the bulk catalog archive, and per-book catalog records. Leave blank for gutenberg.pglaf.org.",
+      "required": false,
+      "default": ""
+    },
+    "GUTENBERG_MIRROR_PATH": {
+      "type": "string",
+      "title": "Catalog mirror path",
+      "description": "Path to the local catalog-mirror SQLite file. Leave blank to use the per-user default that gutenberg-mcp-server mirror init builds.",
+      "required": false,
+      "default": ""
+    },
+    "GUTENBERG_MIRROR_REFRESH_CRON": {
+      "type": "string",
+      "title": "Catalog refresh schedule",
+      "description": "Cron schedule for an in-process catalog-mirror refresh, e.g. 0 4 * * *; on an empty mirror the first run is the full harvest. Leave blank to disable.",
+      "required": false,
+      "default": ""
     }
   }
 }
