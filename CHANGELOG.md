@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-11-11
+
+Reads texts over 8 MiB, including Webster's Unabridged Dictionary, keeps verse line breaks in HTML editions, and answers book lookups from the content mirror's per-book RDF record. The mirror lifecycle runs as gutenberg-mcp-server mirror init, refresh, or verify from an npm install.
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-31
 
 Accent-insensitive catalog matching and resilient book reading.
