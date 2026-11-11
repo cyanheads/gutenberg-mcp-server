@@ -58,7 +58,7 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 | `GutendexService` | Local catalog mirror; live Gutendex API (`gutendex.com/books/`) for search and popularity browse; the content mirror's per-book RDF record (`/cache/epub/N/pgN.rdf`) for single-book lookups | All four tools; `gutenberg_get_book` and `gutenberg_get_text` use it for metadata |
 | `GutenbergTextService` | Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) | `gutenberg_get_text` |
 
-The catalog mirror persists across restarts; live catalog, per-book record, and text responses use tenant-scoped caching. Every catalog fetch shares one failure classifier: 404 is `not_found` (a book) or `page_out_of_range` (a search page); any other 4xx except 408 and 429, and 501, is the non-retryable `catalog_rejected`; 408, 429, 5xx, timeouts, network errors, and a 2xx body that does not parse are `catalog_unavailable` and retried. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
+The catalog mirror persists across restarts; live catalog, per-book record, and text responses use tenant-scoped caching. Every catalog fetch shares one failure classifier: 404 is `not_found` for a book and `page_out_of_range` for Gutendex's `Invalid page.`; any other 4xx except 408 and 429 (another search 404 included), and 501, is the non-retryable `catalog_rejected`; 408, 429, 5xx, timeouts, network errors, and a 2xx body that does not parse are `catalog_unavailable` and retried. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
 
 ---
 
@@ -206,7 +206,7 @@ tool('gutenberg_search_books', {
 
 **Purpose:** Fetch the complete metadata record for a single book by its Gutenberg ID, including the full formats map needed before fetching text.
 
-**Source:** the ready local RDF mirror; on a miss, `GET <GUTENBERG_TEXT_BASE_URL>/cache/epub/{id}/pg{id}.rdf`, the book's own record on the content mirror, parsed with the same `parseBookRdf` the mirror harvest uses. The RDF is authoritative for existence: a 404 is `not_found` with no Gutendex request. A 200 that does not parse to a book is `catalog_unavailable`. The parsed record is cached for one hour at `gutenberg/book/v1/{id}`.
+**Source:** the ready local RDF mirror; on a miss, `GET <GUTENBERG_TEXT_BASE_URL>/cache/epub/{id}/pg{id}.rdf`, the book's own record on the content mirror, parsed with the same `parseBookRdf` the mirror harvest uses. The RDF is authoritative for existence: a 404 is `not_found` with no Gutendex request. A 200 that does not parse to a whole book, including a record cut short before its closing `</rdf:RDF>`, is `catalog_unavailable`. The parsed record is cached for one hour at `gutenberg/book/v1/{id}`.
 
 ```ts
 tool('gutenberg_get_book', {

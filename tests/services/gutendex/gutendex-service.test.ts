@@ -826,6 +826,12 @@ describe('GutendexService — catalog failure classification', () => {
     ['book', 'an empty body', ''],
     ['search', 'an empty body', ''],
     ['book', 'a truncated record', readRdf(84).slice(0, 2971)],
+    // The parser raises nothing here and returns a record holding only the first format.
+    [
+      'book',
+      'a record cut short between tags',
+      readRdf(84).replace(/(?<=<\/dcterms:hasFormat>)[\s\S]*/, ''),
+    ],
     [
       'book',
       'a record with no ebook',

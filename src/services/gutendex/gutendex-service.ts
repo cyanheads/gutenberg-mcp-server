@@ -427,7 +427,15 @@ export class GutendexService {
         operation: 'GutendexService.getBook',
         subject: `the lookup for book ${id}`,
         unavailableMessage: `The Project Gutenberg catalog did not respond for book ${id}.`,
-        parse: (text) => parseBookRdf(text, id),
+        /**
+         * The parser raises nothing on a body that ends between tags and returns the
+         * record read so far, so a record counts only once its root element closes.
+         * Parsing first keeps a malformed body's parser error on `cause`.
+         */
+        parse: (text) => {
+          const book = parseBookRdf(text, id);
+          return book !== null && text.trimEnd().endsWith('</rdf:RDF>') ? book : null;
+        },
         onNotFound: () =>
           notFound(`No book found with Gutenberg ID ${id}.`, { reason: 'not_found' }),
       },
