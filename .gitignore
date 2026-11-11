@@ -32,7 +32,6 @@ dist/
 *.tsbuildinfo
 .tsbuildinfo
 .tsbuildinfo.scripts
-.tsbuildinfo.scripts-check
 *.js.map
 *.d.ts.map
 *.tgz

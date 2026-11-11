@@ -4,11 +4,19 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createInMemoryStorage,
+  createMockContext,
+  type FetchMockHarness,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import fc from 'fast-check';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
+import type { SearchParams } from '@/services/gutendex/types.js';
 import {
   ACTIVE_MARKDOWN,
   contentText,
@@ -795,5 +803,118 @@ describe('gutenbergSearchBooks — catalog_unavailable', () => {
     });
     expect(text).toContain('Recovery:');
     expect(text).not.toContain('gutendex.com');
+  });
+});
+
+// ── Live catalog failures through the real service (#58) ─────────────────────
+//
+// The classifier is tabled at its own seam in the service suite; these prove the
+// tool's wiring end to end with the real service behind a fetch fake. No catalog
+// mirror is initialized here, so every search goes to the live catalog.
+
+/** The recovery this tool declares for a reason. */
+function declared(reason: string): string | undefined {
+  return (gutenbergSearchBooks.errors as readonly { reason: string; recovery: string }[]).find(
+    (entry) => entry.reason === reason,
+  )?.recovery;
+}
+
+describe('gutenbergSearchBooks — live catalog failures', () => {
+  let http: FetchMockHarness;
+
+  beforeEach(async () => {
+    const { GutendexService } = await vi.importActual<
+      typeof import('@/services/gutendex/gutendex-service.js')
+    >('@/services/gutendex/gutendex-service.js');
+    const service = new GutendexService({} as AppConfig, createInMemoryStorage(), {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: 'https://mirror.test',
+      mirrorPath: ':memory:',
+    });
+    mockGutendexService.searchBooks.mockImplementation((params: SearchParams, ctx: Context) =>
+      service.searchBooks(params, ctx),
+    );
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    mockGutendexService.searchBooks.mockReset();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    [403, '<html>403 Forbidden</html>'],
+    [404, '{"detail":"Not found."}'],
+  ])(
+    'fails a live HTTP %i as catalog_rejected after one request, naming no host on either surface',
+    async (status, body) => {
+      http.route({
+        match: /^https:\/\/catalog\.test\//,
+        respond: () => new Response(body, { status }),
+      });
+
+      const result = await runToolContract(gutenbergSearchBooks, { query: 'frankenstein' });
+
+      expect(result.isError).toBe(true);
+      const hint = declared('catalog_rejected');
+      expect(hint).toEqual(expect.any(String));
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: JsonRpcErrorCode.Forbidden,
+          message: 'The Project Gutenberg catalog rejected the search request.',
+          data: { reason: 'catalog_rejected', recovery: { hint } },
+        },
+      });
+      expect(readBack(contentText(result)).text).toBe(
+        `Error: The Project Gutenberg catalog rejected the search request.\n\nRecovery: ${hint}\n\n(reason catalog_rejected)`,
+      );
+      for (const leak of ['catalog.test', '://', '403 Forbidden', 'Not found.']) {
+        expect(JSON.stringify(result)).not.toContain(leak);
+      }
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
+  it('keeps an "Invalid page." 404 as page_out_of_range', async () => {
+    http.route({
+      match: /^https:\/\/catalog\.test\//,
+      respond: () => Response.json({ detail: 'Invalid page.' }, { status: 404 }),
+    });
+
+    const result = await runToolContract(gutenbergSearchBooks, { query: 'frankenstein', page: 9 });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'page_out_of_range' } },
+    });
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('fails a non-JSON 200 as catalog_unavailable with no upstream text on either surface', async () => {
+    vi.useFakeTimers();
+    http.route({
+      match: /^https:\/\/catalog\.test\//,
+      respond: () =>
+        new Response('not json at all', { headers: { 'content-type': 'application/json' } }),
+    });
+
+    const pending = runToolContract(gutenbergSearchBooks, { query: 'frankenstein' });
+    await vi.advanceTimersByTimeAsync(16_000);
+    const result = await pending;
+
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'The Project Gutenberg catalog did not respond.',
+        data: {
+          reason: 'catalog_unavailable',
+          recovery: { hint: declared('catalog_unavailable') },
+        },
+      },
+    });
+    for (const leak of ['catalog.test', '://', 'not json', 'JSON', 'Unexpected']) {
+      expect(JSON.stringify(result)).not.toContain(leak);
+    }
   });
 });

@@ -1,7 +1,9 @@
 /**
- * @fileoverview Service wrapping the Gutendex catalog API (gutendex.com/books/).
- * Provides search, single-book lookup, and popularity browse with retry, timeout,
- * and in-process response caching (1-hour TTL).
+ * @fileoverview The Project Gutenberg catalog service. Search and popularity browse
+ * read the local catalog mirror, falling back to the live Gutendex API; a single-book
+ * lookup reads the mirror, falling back to the book's own RDF record on the content
+ * mirror. Every catalog fetch shares one failure classifier and a retry ladder under
+ * one deadline, with in-process caching (1-hour TTL).
  * @module services/gutendex/gutendex-service
  */
 
@@ -9,18 +11,25 @@ import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
-  JsonRpcErrorCode,
+  forbidden,
   McpError,
   notFound,
   serviceUnavailable,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  fetchWithTimeout,
+  type RetryAttempt,
+  requestContextService,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import { bestEffortCache } from '@/services/best-effort-cache.js';
 import { getCatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
+import { parseBookRdf } from '@/services/catalog-mirror/rdf-book-parser.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
+import { isRejection } from '@/services/upstream-rejection.js';
 import {
   type Book,
   hasPlainText,
@@ -46,8 +55,8 @@ function urlCacheKey(prefix: string, url: string): string {
  * Gutendex answers a page beyond the result set with HTTP 404 +
  * `{"detail":"Invalid page."}`. `fetchWithTimeout` surfaces that body on
  * `McpError.data.body`; key the page-out-of-range translation off that
- * exact shape so genuinely-missing resources (any other 404) aren't
- * misclassified as an out-of-range page.
+ * exact shape so any other search 404 — an endpoint that is not there —
+ * is classified as a rejection, not an out-of-range page.
  */
 function isInvalidPageResponse(data: unknown): boolean {
   if (typeof data !== 'object' || data === null) return false;
@@ -60,14 +69,106 @@ function isInvalidPageResponse(data: unknown): boolean {
   }
 }
 
+/** A parsed Gutendex search page, or null for JSON of any other shape. */
+function parseSearchPage(text: string): RawBooksPage | null {
+  const page: unknown = JSON.parse(text);
+  if (typeof page !== 'object' || page === null) return null;
+  const { count, results } = page as Partial<Record<keyof RawBooksPage, unknown>>;
+  return typeof count === 'number' && Array.isArray(results) ? (page as RawBooksPage) : null;
+}
+
 /**
  * Whole catalog ladder budget. Each attempt can use all remaining time, so a
  * slow successful response is not restarted. Catalog plus text stays below 50s.
  */
 const CATALOG_BUDGET_MS = 15_000;
-/** Contract reason the catalog-backed tools declare for an unreachable Gutendex. */
+/** Contract reason the catalog-backed tools declare for a catalog that did not answer. */
 const CATALOG_UNAVAILABLE = 'catalog_unavailable';
+/** Contract reason the catalog-backed tools declare for a request the catalog refuses. */
+const CATALOG_REJECTED = 'catalog_rejected';
 const CATALOG_TTL_SECONDS = 3600; // 1 hour
+
+/** One catalog document: where it lives, how its body reads, and what its 404 means. */
+interface CatalogRequest<T> {
+  accept?: string;
+  /** The domain failure a 404 stands for, or undefined to classify it as a rejection. */
+  onNotFound: (error: McpError) => McpError | undefined;
+  /** Log label for the ladder and each attempt. */
+  operation: string;
+  /** The document in the body, or null when the body is not one; may throw. */
+  parse: (text: string) => T | null;
+  /** The request in client-facing words, such as `the search request` — never a URL. */
+  subject: string;
+  /** Client-facing wording when the budget runs out or every attempt failed. */
+  unavailableMessage: string;
+  url: string;
+}
+
+/**
+ * Fetch one catalog document under the catalog budget and classify every failure the
+ * way the text reader classifies a text file. Inside each attempt: a caller cancel
+ * passes through untouched; a 404 becomes the request's domain failure where it names
+ * one; any other rejection status becomes `catalog_rejected`, which is not retried; a
+ * 2xx body that does not parse is raised as an outage, so it is retried like one.
+ * Everything transient is left to the ladder, which reports it as
+ * `catalog_unavailable` once the budget or the attempts run out. Messages name the
+ * catalog and the request, never its URL; the upstream error stays on `cause`.
+ */
+function fetchCatalogDocument<T>(
+  request: CatalogRequest<T>,
+  ctx: Context,
+  budgetMs: number,
+): Promise<T> {
+  const attempt = async ({ signal, remainingMs }: RetryAttempt): Promise<T> => {
+    const reqCtx = requestContextService.createRequestContext({
+      parentContext: ctx,
+      operation: request.operation,
+    });
+    let text: string;
+    try {
+      const response = await fetchWithTimeout(request.url, remainingMs, reqCtx, {
+        signal,
+        ...(request.accept !== undefined && { headers: { Accept: request.accept } }),
+        expectedStatuses: [404],
+      });
+      text = await response.text();
+    } catch (error: unknown) {
+      if (ctx.signal.aborted || !(error instanceof McpError)) throw error;
+      const status = error.data?.status;
+      if (typeof status !== 'number') throw error;
+      const domainError = status === 404 ? request.onNotFound(error) : undefined;
+      if (domainError) throw domainError;
+      if (isRejection(status)) {
+        throw forbidden(
+          `The Project Gutenberg catalog rejected ${request.subject}.`,
+          { reason: CATALOG_REJECTED, ...ctx.recoveryFor(CATALOG_REJECTED) },
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    const unreadable = `The Project Gutenberg catalog returned an unreadable response to ${request.subject}.`;
+    let document: T | null;
+    try {
+      document = request.parse(text);
+    } catch (error: unknown) {
+      throw serviceUnavailable(unreadable, undefined, { cause: error });
+    }
+    if (document === null) throw serviceUnavailable(unreadable);
+    return document;
+  };
+  return withUpstreamDeadline(
+    ctx,
+    { budgetMs, message: request.unavailableMessage, reason: CATALOG_UNAVAILABLE },
+    (signal) =>
+      withRetry(attempt, {
+        operation: request.operation,
+        baseDelayMs: 1000,
+        deadlineMs: budgetMs,
+        signal,
+      }),
+  );
+}
 
 function normalizePerson(p: RawPerson) {
   return {
@@ -106,12 +207,15 @@ function normalizeBook(raw: RawBook): Book {
 
 export class GutendexService {
   private readonly baseUrl: string;
+  /** Content mirror root, without a trailing slash; per-book RDF records live under it. */
+  private readonly contentBaseUrl: string;
 
   constructor(_config: AppConfig, _storage: StorageService, serverConfig: ServerConfig) {
     // Ensure trailing slash
     this.baseUrl = serverConfig.gutendexBaseUrl.endsWith('/')
       ? serverConfig.gutendexBaseUrl
       : `${serverConfig.gutendexBaseUrl}/`;
+    this.contentBaseUrl = serverConfig.gutenbergTextBaseUrl.replace(/\/$/, '');
   }
 
   /** Optional diagnostics never fall back to a live request or invalidate an answered search. */
@@ -159,56 +263,27 @@ export class GutendexService {
       return cached;
     }
 
-    const page = await withUpstreamDeadline(
-      ctx,
+    const page = await fetchCatalogDocument(
       {
-        budgetMs: CATALOG_BUDGET_MS,
-        message: 'The Project Gutenberg catalog did not respond.',
-        reason: CATALOG_UNAVAILABLE,
+        url,
+        accept: 'application/json',
+        operation: 'GutendexService.fetchPage',
+        subject: 'the search request',
+        unavailableMessage: 'The Project Gutenberg catalog did not respond.',
+        parse: parseSearchPage,
+        /**
+         * Gutendex returns 404 + {"detail":"Invalid page."} when the requested page is
+         * past the last page for a query; only that shape is a page out of range.
+         */
+        onNotFound: (error) =>
+          isInvalidPageResponse(error.data)
+            ? notFound('The requested page is beyond the available result range.', {
+                reason: 'page_out_of_range',
+              })
+            : undefined,
       },
-      (signal) =>
-        withRetry(
-          async ({ signal: attemptSignal, remainingMs }) => {
-            const reqCtx = requestContextService.createRequestContext({
-              parentContext: ctx,
-              operation: 'GutendexService.fetchPage',
-            });
-            // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
-            // transient set, so withRetry won't retry it. Gutendex returns 404 +
-            // {"detail":"Invalid page."} when the requested page is past the last
-            // page for a query; translate only that shape to a distinct domain
-            // reason the tool can surface with recovery, and let other 404s bubble.
-            const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
-              signal: attemptSignal,
-              headers: { Accept: 'application/json' },
-              expectedStatuses: [404],
-            }).catch((err: unknown) => {
-              if (
-                err instanceof McpError &&
-                err.code === JsonRpcErrorCode.NotFound &&
-                isInvalidPageResponse(err.data)
-              ) {
-                throw notFound('The requested page is beyond the available result range.', {
-                  reason: 'page_out_of_range',
-                });
-              }
-              throw err;
-            });
-            const text = await response.text();
-            if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-              throw serviceUnavailable(
-                'Gutendex returned an HTML error page instead of JSON — likely rate-limited or unavailable.',
-              );
-            }
-            return JSON.parse(text) as RawBooksPage;
-          },
-          {
-            operation: 'GutendexService.fetchPage',
-            baseDelayMs: 1000,
-            deadlineMs: CATALOG_BUDGET_MS,
-            signal,
-          },
-        ),
+      ctx,
+      CATALOG_BUDGET_MS,
     );
 
     await bestEffortCache(ctx, cacheKey, page, CATALOG_TTL_SECONDS);
@@ -269,7 +344,7 @@ export class GutendexService {
       books,
       totalCount: page.count,
       hasMore: page.next !== null,
-      page: params.page ?? 1,
+      page: pageNumber,
       source: 'live',
     };
   }
@@ -298,8 +373,8 @@ export class GutendexService {
    * turn a staleness window into a wrong answer.
    *
    * A mirror fault is downgraded to a miss rather than propagated. The mirror is an
-   * availability optimization layered under a working live path; a corrupt database
-   * or a missing file should cost latency, never correctness.
+   * availability optimization layered under a working upstream path; a corrupt
+   * database or a missing file should cost latency, never correctness.
    */
   private async mirrorBook(id: number, ctx: Context): Promise<Book | null> {
     try {
@@ -308,7 +383,7 @@ export class GutendexService {
       const [book] = await mirror.getBooks([id]);
       return book ?? null;
     } catch (err: unknown) {
-      ctx.log.debug('Catalog mirror unavailable; falling back to the live catalog', {
+      ctx.log.debug("Catalog mirror unavailable; falling back to the book's RDF record", {
         id,
         reason: err instanceof Error ? err.message : String(err),
       });
@@ -318,8 +393,14 @@ export class GutendexService {
 
   /**
    * Fetch a single book by Gutenberg ID. Serves from the local mirror when it holds
-   * the record, and falls through to the live catalog otherwise. Throws not_found if
-   * the live lookup 404s.
+   * the record, and otherwise reads the book's own RDF record from the content mirror
+   * the text comes from, parsed exactly as the mirror harvest parses it. That record is
+   * Project Gutenberg's authority for the ID, so its 404 is `not_found`. Gutendex is
+   * never asked: it is slow or silent for the books a mirror lacks, those posted since
+   * the last harvest.
+   *
+   * @param deadlineAtMs - Absolute deadline a caller shares with later upstream work;
+   *   the lookup takes at most the catalog budget out of it.
    */
   async getBook(id: number, ctx: Context, deadlineAtMs?: number): Promise<Book> {
     const mirrored = await this.mirrorBook(id, ctx);
@@ -328,62 +409,34 @@ export class GutendexService {
       return mirrored;
     }
 
-    const url = `${this.baseUrl}${id}/`;
-    const cacheKey = `gutendex/book/${id}`;
-
-    const cached = await ctx.state.get<RawBook>(cacheKey);
+    /** The parsed record; the retired `gutendex/book/<id>` key held a Gutendex payload. */
+    const cacheKey = `gutenberg/book/v1/${id}`;
+    const cached = await ctx.state.get<Book>(cacheKey);
     if (cached) {
       ctx.log.debug('Book cache hit', { id });
-      return normalizeBook(cached);
+      return cached;
     }
 
     const budgetMs =
       deadlineAtMs === undefined
         ? CATALOG_BUDGET_MS
         : Math.max(0, Math.min(CATALOG_BUDGET_MS, deadlineAtMs - Date.now()));
-    const raw = await withUpstreamDeadline(
-      ctx,
+    const book = await fetchCatalogDocument(
       {
-        budgetMs,
-        message: `The Project Gutenberg catalog did not respond for book ${id}.`,
-        reason: CATALOG_UNAVAILABLE,
+        url: `${this.contentBaseUrl}/cache/epub/${id}/pg${id}.rdf`,
+        operation: 'GutendexService.getBook',
+        subject: `the lookup for book ${id}`,
+        unavailableMessage: `The Project Gutenberg catalog did not respond for book ${id}.`,
+        parse: (text) => parseBookRdf(text, id),
+        onNotFound: () =>
+          notFound(`No book found with Gutenberg ID ${id}.`, { reason: 'not_found' }),
       },
-      (signal) =>
-        withRetry(
-          async ({ signal: attemptSignal, remainingMs }) => {
-            const reqCtx = requestContextService.createRequestContext({
-              parentContext: ctx,
-              operation: 'GutendexService.getBook',
-            });
-            // fetchWithTimeout throws McpError(NotFound) for HTTP 404 — not in the
-            // transient set, so withRetry won't retry it.
-            const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
-              signal: attemptSignal,
-              headers: { Accept: 'application/json' },
-              expectedStatuses: [404],
-            }).catch((err: unknown) => {
-              if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-                throw notFound(`No book found with Gutenberg ID ${id}.`, { reason: 'not_found' });
-              }
-              throw err;
-            });
-            const text = await response.text();
-            if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-              throw serviceUnavailable('Gutendex returned an HTML error page.');
-            }
-            return JSON.parse(text) as RawBook;
-          },
-          {
-            operation: 'GutendexService.getBook',
-            baseDelayMs: 1000,
-            deadlineMs: budgetMs,
-            signal,
-          },
-        ),
+      ctx,
+      budgetMs,
     );
 
-    await bestEffortCache(ctx, cacheKey, raw, CATALOG_TTL_SECONDS);
-    return normalizeBook(raw);
+    await bestEffortCache(ctx, cacheKey, book, CATALOG_TTL_SECONDS);
+    return book;
   }
 }
 

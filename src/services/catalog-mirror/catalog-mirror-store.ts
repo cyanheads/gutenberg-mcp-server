@@ -1,5 +1,5 @@
 /**
- * @fileoverview Schema and row mapping for the local Gutendex catalog mirror. Holds
+ * @fileoverview Schema and row mapping for the local Project Gutenberg catalog mirror. Holds
  * the SQLite column declaration, the FTS5 index over the fields
  * `gutenberg_search_books` matches on, and the two-way translation between a
  * normalized {@link Book} and one stored row.

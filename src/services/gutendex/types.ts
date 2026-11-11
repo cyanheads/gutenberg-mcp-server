@@ -61,7 +61,7 @@ export interface Book {
   /** Direct RDF bibliographic notes; null when the source did not supply them. */
   source_notes: string[] | null;
   subjects: string[];
-  /** Source summaries: sorted on the RDF mirror, upstream order on live fallback. */
+  /** Source summaries: sorted when read from RDF, upstream order from a live Gutendex search. */
   summaries: string[];
   /** First entry of {@link summaries}, not necessarily primary, or null when absent. */
   summary: string | null;

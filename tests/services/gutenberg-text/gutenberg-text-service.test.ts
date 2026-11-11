@@ -5,6 +5,7 @@
  * @module tests/services/gutenberg-text/gutenberg-text-service.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { databaseError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
@@ -89,6 +90,20 @@ const htmlOnlyBook: Book = {
   has_plain_text: false,
 };
 
+/** Where a lookup the local catalog mirror cannot answer reads the book's own record. */
+const RESOLVED_RDF_URL = `${MIRROR_HOST}/cache/epub/${BOOK_ID}/pg${BOOK_ID}.rdf`;
+
+/** A minimal per-book RDF record carrying `record`'s title, media type, and formats. */
+function bookRdf(record: Book): string {
+  const files = Object.entries(record.formats)
+    .map(
+      ([mimeType, url]) =>
+        `<dcterms:hasFormat><pgterms:file rdf:about="${url}"><dcterms:format><rdf:Description><rdf:value>${mimeType}</rdf:value></rdf:Description></dcterms:format></pgterms:file></dcterms:hasFormat>`,
+    )
+    .join('');
+  return `<?xml version="1.0" encoding="utf-8"?><rdf:RDF xmlns:dcterms="http://purl.org/dc/terms/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:pgterms="http://www.gutenberg.org/2009/pgterms/"><pgterms:ebook rdf:about="ebooks/${record.id}"><dcterms:title>${record.title}</dcterms:title><dcterms:type><rdf:Description><rdf:value>${record.media_type}</rdf:value></rdf:Description></dcterms:type>${files}</pgterms:ebook></rdf:RDF>`;
+}
+
 /** Serve `html` as the HTML-only book's mirror file and return what the real pipeline stores. */
 async function fetchHtmlEntry(http: FetchMockHarness, html: string): Promise<CachedText> {
   http.route({ match: RESOLVED_HTML_URL, respond: () => new Response(html) });
@@ -128,6 +143,7 @@ describe('GutenbergTextService — mirror ladder', () => {
     'preserves a cancelled cache-write rejection on %s',
     async (lane) => {
       http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
+      http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(book)) });
       http.route({
         match: /^https:\/\/catalog.test\//,
         respond: () =>
@@ -174,6 +190,7 @@ describe('GutenbergTextService — mirror ladder', () => {
     'returns fetched data when real provider capacity rejects the %s cache write',
     async (lane) => {
       http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
+      http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(book)) });
       http.route({
         match: /^https:\/\/catalog.test\//,
         respond: () =>
@@ -262,8 +279,8 @@ describe('GutenbergTextService — mirror ladder', () => {
           }),
         );
       http.route({
-        match: `https://catalog.test/books/${BOOK_ID}/`,
-        respond: (request) => body(request, JSON.stringify(book), catalogMs),
+        match: RESOLVED_RDF_URL,
+        respond: (request) => body(request, bookRdf(book), catalogMs),
       });
       http.route({ match: RESOLVED_URL, respond: (request) => body(request, MIRROR_FILE, textMs) });
       const pending = runToolContract(gutenbergGetText, { id: BOOK_ID, limit: 100 });
@@ -366,10 +383,7 @@ describe('GutenbergTextService — mirror ladder', () => {
       const storage = createInMemoryStorage();
       initGutendexService({} as AppConfig, storage, config);
       initGutenbergTextService({} as AppConfig, storage, config);
-      http.route({
-        match: `https://catalog.test/books/${BOOK_ID}/`,
-        respond: () => Response.json(book),
-      });
+      http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(book)) });
       http.route({
         match: RESOLVED_URL,
         respond:
@@ -420,6 +434,7 @@ describe('GutenbergTextService — mirror ladder', () => {
     [404, 'text_file_not_found', JsonRpcErrorCode.NotFound],
     [403, 'text_fetch_rejected', JsonRpcErrorCode.Forbidden],
     [400, 'text_fetch_rejected', JsonRpcErrorCode.Forbidden],
+    [501, 'text_fetch_rejected', JsonRpcErrorCode.Forbidden],
   ])('sanitizes permanent HTTP %i without retrying or caching', async (status, reason, code) => {
     http.route({
       match: RESOLVED_URL,
@@ -540,7 +555,7 @@ describe('GutenbergTextService — mirror ladder', () => {
   it('does not serve an entry cached under the previous text key', async () => {
     http.route({ match: RESOLVED_URL, respond: () => new Response(MIRROR_FILE) });
     const ctx = createMockContext({ errors: gutenbergGetText.errors });
-    await ctx.state.set(`gutenberg/text/v2/${BOOK_ID}`, {
+    await ctx.state.set(`gutenberg/text/v3/${BOOK_ID}`, {
       text: 'text from the previous processing version',
       sourceFormat: 'text/plain; charset=utf-8',
       title: book.title,
@@ -574,10 +589,7 @@ describe('GutenbergTextService — mirror ladder', () => {
       const storage = createInMemoryStorage();
       initGutendexService({} as AppConfig, storage, config);
       initGutenbergTextService({} as AppConfig, storage, config);
-      http.route({
-        match: `https://catalog.test/books/${BOOK_ID}/`,
-        respond: () => Response.json(book),
-      });
+      http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(book)) });
       http.route({
         match: RESOLVED_URL,
         respond: () => new Response(body, { status, headers: { 'content-type': contentType } }),
@@ -682,8 +694,627 @@ describe('GutenbergTextService — mirror ladder', () => {
     const entry = await makeService().fetchAndCacheText(book, BOOK_ID, ctx);
     expect(entry.text).toBe('It is a truth universally acknowledged.');
     expect(warning.mock.calls).toEqual([
-      ['Cache write failed', { cacheKey: `gutenberg/text/v3/${BOOK_ID}` }],
+      ['Cache write failed', { cacheKey: `gutenberg/text/v4/${BOOK_ID}` }],
     ]);
+  });
+});
+
+// ── Parallel byte ranges for the largest plain-text files (#61) ──────────────
+
+const MIB = 1024 * 1024;
+const ETAG = '"6accf659-1b9d6be"';
+const TOO_LARGE_RECOVERY =
+  "This book's text file is too large for this server to download within one call; repeating the call will not help. Search gutenberg_search_books for another edition of the work.";
+/**
+ * A stand-in connection delivers one chunk per tick. Each fake-timer firing costs a real
+ * macrotask, which a loaded machine stretches, so a long tick keeps a capped read to a
+ * few dozen firings.
+ */
+const TICK_MS = 2_000;
+
+/**
+ * A plain-text edition of exactly `size` bytes: markers around ASCII prose, with a
+ * four-byte character straddling each boundary a four-way split cuts.
+ */
+function largeEdition(size: number): Uint8Array {
+  const encoder = new TextEncoder();
+  const head = encoder.encode('*** START OF THE PROJECT GUTENBERG EBOOK LARGE ***\n');
+  const tail = encoder.encode('\n*** END OF THE PROJECT GUTENBERG EBOOK LARGE ***\n');
+  const line = encoder.encode('It is a truth universally acknowledged.\n');
+  const bytes = new Uint8Array(size);
+  const proseEnd = size - tail.length;
+  for (let at = head.length; at < proseEnd; at += line.length) {
+    bytes.set(line.subarray(0, proseEnd - at), at);
+  }
+  bytes.set(head, 0);
+  bytes.set(tail, proseEnd);
+  const span = Math.ceil(size / 4);
+  for (let index = 1; index < 4; index++) bytes.set(encoder.encode('😀'), index * span - 2);
+  return bytes;
+}
+
+/** A body that delivers `bytes`, `bytesPerTick` per tick when capped, and errors on abort. */
+function mirrorBody(
+  request: Request,
+  bytes: Uint8Array,
+  bytesPerTick: number | undefined,
+  onCancel: () => void,
+): ReadableStream<Uint8Array> {
+  let offset = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let done = false;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      request.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          if (done) return;
+          done = true;
+          controller.error(request.signal.reason);
+        },
+        { once: true },
+      );
+    },
+    pull(controller) {
+      const deliver = () => {
+        const chunk = bytes.subarray(offset, bytesPerTick ? offset + bytesPerTick : bytes.length);
+        offset += chunk.length;
+        controller.enqueue(chunk);
+        if (offset >= bytes.length) {
+          done = true;
+          controller.close();
+        }
+      };
+      if (!bytesPerTick) {
+        deliver();
+        return;
+      }
+      return new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          deliver();
+          resolve();
+        }, TICK_MS);
+      });
+    },
+    cancel() {
+      clearTimeout(timer);
+      done = true;
+      onCancel();
+    },
+  });
+}
+
+interface StandInMirror {
+  /** Whole-file bodies the reader cancelled. */
+  cancelled: number;
+  /** Every request the mirror received, in arrival order, signals live. */
+  requests: Request[];
+}
+
+/**
+ * A stand-in for gutenberg.pglaf.org serving `bytes` at book `id`'s plain-text cache
+ * path: `Accept-Ranges`, a strong ETag, `Range` honored only under a matching `If-Range`.
+ * `bytesPerTick` caps every connection's throughput, as the real mirror does.
+ * `headers` overrides the whole-file response's headers (null removes one), and
+ * `answerRange` replaces the answer to a range request.
+ */
+function standInMirror(
+  http: FetchMockHarness,
+  bytes: Uint8Array,
+  {
+    id = BOOK_ID,
+    bytesPerTick,
+    headers = {},
+    answerRange,
+  }: {
+    id?: number;
+    bytesPerTick?: number;
+    headers?: Record<string, string | null>;
+    answerRange?: (
+      request: Request,
+      start: number,
+      end: number,
+    ) => Response | Promise<Response> | undefined;
+  } = {},
+): StandInMirror {
+  const mirror: StandInMirror = { cancelled: 0, requests: [] };
+  const wholeHeaders = new Headers({
+    'content-type': 'text/plain; charset=utf-8',
+    'content-length': String(bytes.length),
+    'accept-ranges': 'bytes',
+    etag: ETAG,
+  });
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === null) wholeHeaders.delete(name);
+    else wholeHeaders.set(name, value);
+  }
+  http.route({
+    match: `${MIRROR_HOST}/cache/epub/${id}/pg${id}.txt`,
+    respond: (request) => {
+      mirror.requests.push(request);
+      const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.get('range') ?? '');
+      if (!range || request.headers.get('if-range') !== ETAG) {
+        return new Response(
+          mirrorBody(request, bytes, bytesPerTick, () => {
+            mirror.cancelled += 1;
+          }),
+          { headers: wholeHeaders },
+        );
+      }
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      const answer = answerRange?.(request, start, end);
+      if (answer) return answer;
+      return new Response(
+        mirrorBody(request, bytes.subarray(start, end + 1), bytesPerTick, () => {}),
+        {
+          status: 206,
+          headers: {
+            'content-type': 'text/plain; charset=utf-8',
+            'content-length': String(end - start + 1),
+            'content-range': `bytes ${start}-${end}/${bytes.length}`,
+            etag: ETAG,
+          },
+        },
+      );
+    },
+  });
+  return mirror;
+}
+
+/** The four `Range` values a read of `size` bytes asks for. */
+function rangesOf(size: number): string[] {
+  const span = Math.ceil(size / 4);
+  return [0, 1, 2, 3].map(
+    (index) => `bytes=${index * span}-${Math.min(size, (index + 1) * span) - 1}`,
+  );
+}
+
+describe('GutenbergTextService — ranged reads of the largest files', () => {
+  let http: FetchMockHarness;
+  /**
+   * Teardown aborts this and waits for every read the test started, so a test that
+   * fails or times out with ranges in flight leaves none running into the next test.
+   */
+  let teardown: AbortController;
+  let reads: Promise<unknown>[];
+  const SIZE = 8 * MIB + 4096;
+  const span = Math.ceil(SIZE / 4);
+
+  beforeEach(() => {
+    http = createFetchMock();
+    http.install();
+    teardown = new AbortController();
+    reads = [];
+  });
+
+  afterEach(async () => {
+    teardown.abort();
+    await Promise.allSettled(reads);
+    http.restore();
+    vi.useRealTimers();
+  });
+
+  /** A tool context the teardown cancels, as well as any `signal` of the test's own. */
+  const context = (signal?: AbortSignal) =>
+    createMockContext({
+      errors: gutenbergGetText.errors,
+      signal: signal ? AbortSignal.any([teardown.signal, signal]) : teardown.signal,
+    });
+
+  /** Read book `id`'s plain text, tracked for teardown. */
+  const read = ({
+    ctx = context(),
+    deadlineAtMs,
+    id = BOOK_ID,
+  }: {
+    ctx?: Context;
+    deadlineAtMs?: number;
+    id?: number;
+  } = {}) => {
+    const pending = makeService().fetchAndCacheText(book, id, ctx, deadlineAtMs);
+    reads.push(pending);
+    return pending;
+  };
+
+  it('reads a file one capped connection cannot carry in four ranges, byte-identical to a single read', async () => {
+    vi.useFakeTimers();
+    const bytes = largeEdition(9 * MIB);
+    /** 150 KiB/s per connection: one connection needs 61 s for the file, one range 15.4 s. */
+    const bytesPerTick = 300 * 1024;
+    /**
+     * The same file on one capped connection, in capped ranges, and uncapped as the
+     * reference, each under its own ID so all three reads start before the first await.
+     */
+    const ONE_CONNECTION_ID = BOOK_ID + 1;
+    const REFERENCE_ID = BOOK_ID + 2;
+    standInMirror(http, bytes, {
+      id: ONE_CONNECTION_ID,
+      bytesPerTick,
+      headers: { 'accept-ranges': null },
+    });
+    const mirror = standInMirror(http, bytes, { bytesPerTick });
+    standInMirror(http, bytes, { id: REFERENCE_ID, headers: { 'accept-ranges': null } });
+
+    const single = read({ id: ONE_CONNECTION_ID }).catch((error: unknown) => error);
+    const ranged = read();
+    const reference = read({ id: REFERENCE_ID });
+    let settled = false;
+    const markSettled = () => {
+      settled = true;
+    };
+    /** Both handlers, so a read the teardown cancels leaves no rejection unhandled. */
+    ranged.then(markSettled, markSettled);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(settled).toBe(true);
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(await single).toMatchObject({
+      message: `The Gutenberg text download for book ${ONE_CONNECTION_ID} did not finish in time.`,
+      data: { reason: 'text_fetch_failed' },
+    });
+
+    const entry = await ranged;
+    const expected = await reference;
+    expect(entry.text.length).toBe(expected.text.length);
+    expect(entry.text === expected.text).toBe(true);
+
+    expect(mirror.requests.map((request) => request.headers.get('range'))).toEqual([
+      null,
+      ...rangesOf(bytes.length),
+    ]);
+    expect(mirror.requests[0]?.headers.get('accept-encoding')).toBeNull();
+    for (const request of mirror.requests.slice(1)) {
+      expect(request.headers.get('accept-encoding')).toBe('identity');
+      expect(request.headers.get('if-range')).toBe(ETAG);
+    }
+    expect(mirror.cancelled).toBe(1);
+  });
+
+  it('decodes a character split across each range boundary once, after assembly', async () => {
+    const bytes = largeEdition(SIZE);
+    for (let index = 1; index < 4; index++) {
+      // A UTF-8 continuation byte opens the range: the boundary splits the character.
+      expect((bytes[index * span] as number) & 0xc0).toBe(0x80);
+    }
+    const mirror = standInMirror(http, bytes);
+    const entry = await read();
+    expect(mirror.requests).toHaveLength(5);
+    for (const request of mirror.requests.slice(1)) {
+      expect(request.headers.get('accept-encoding')).toBe('identity');
+      expect(request.headers.get('if-range')).toBe(ETAG);
+    }
+    expect(entry.text.match(/😀/gu)).toHaveLength(3);
+    expect(entry.text).not.toContain('�');
+  });
+
+  it('reads a body one byte over 8 MiB as four ranges', async () => {
+    const mirror = standInMirror(http, largeEdition(8 * MIB + 1));
+    await read();
+    expect(mirror.requests.map((request) => request.headers.get('range'))).toEqual([
+      null,
+      ...rangesOf(8 * MIB + 1),
+    ]);
+  });
+
+  it.each([
+    ['a body of exactly 8 MiB', 8 * MIB, {}],
+    ['a compressed body', SIZE, { 'content-encoding': 'gzip' }],
+    ['a body without Accept-Ranges', SIZE, { 'accept-ranges': null }],
+    ['Accept-Ranges: none', SIZE, { 'accept-ranges': 'none' }],
+    ['a body without an ETag', SIZE, { etag: null }],
+    ['a weak ETag', SIZE, { etag: `W/${ETAG}` }],
+    ['a body without Content-Length', SIZE, { 'content-length': null }],
+  ])('reads %s on one connection, as before', async (_name, size, headers) => {
+    const mirror = standInMirror(http, largeEdition(size), { headers });
+    const entry = await read();
+    expect(mirror.requests).toHaveLength(1);
+    expect(mirror.requests[0]?.headers.get('range')).toBeNull();
+    expect(mirror.requests[0]?.headers.get('accept-encoding')).toBeNull();
+    expect(mirror.cancelled).toBe(0);
+    expect(entry.text.match(/😀/gu)).toHaveLength(3);
+  });
+
+  it.each([
+    [
+      'the whole file with 200',
+      (bytes: Uint8Array) =>
+        new Response(bytes, { headers: { 'content-length': String(bytes.length) } }),
+    ],
+    [
+      'a 200 that carries the requested Content-Range',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start, end + 1), {
+          headers: { 'content-range': `bytes ${start}-${end}/${bytes.length}` },
+        }),
+    ],
+    [
+      'a different Content-Range',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start + 1, end + 2), {
+          status: 206,
+          headers: { 'content-range': `bytes ${start + 1}-${end + 1}/${bytes.length}` },
+        }),
+    ],
+    [
+      'a different total',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start, end + 1), {
+          status: 206,
+          headers: { 'content-range': `bytes ${start}-${end}/${bytes.length + 1}` },
+        }),
+    ],
+    [
+      'a Content-Encoding',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start, end + 1), {
+          status: 206,
+          headers: {
+            'content-range': `bytes ${start}-${end}/${bytes.length}`,
+            'content-encoding': 'gzip',
+          },
+        }),
+    ],
+    [
+      'a body one byte short',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start, end), {
+          status: 206,
+          headers: { 'content-range': `bytes ${start}-${end}/${bytes.length}` },
+        }),
+    ],
+    [
+      'a body one byte long',
+      (bytes: Uint8Array, start: number, end: number) =>
+        new Response(bytes.subarray(start, end + 2), {
+          status: 206,
+          headers: { 'content-range': `bytes ${start}-${end}/${bytes.length}` },
+        }),
+    ],
+  ])(
+    'fails a range answered with %s as text_fetch_failed, assembling nothing',
+    async (_name, answer) => {
+      const bytes = largeEdition(SIZE);
+      const mirror = standInMirror(http, bytes, {
+        answerRange: (_request, start, end) =>
+          start === span ? answer(bytes, start, end) : undefined,
+      });
+      const ctx = context();
+      const set = vi.spyOn(ctx.state, 'set');
+      const error = (await read({ ctx }).catch((e: unknown) => e)) as McpError;
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(
+        `Failed to fetch text for book ${BOOK_ID}: the Gutenberg mirror remained temporarily unavailable.`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'text_fetch_failed',
+        recovery: { hint: expect.any(String) },
+      });
+      const second = rangesOf(SIZE)[1];
+      expect(mirror.requests.filter((r) => r.headers.get('range') === second)).toHaveLength(1);
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails a 404 on one range as text_file_not_found without retry, aborting the others', async () => {
+    vi.useFakeTimers();
+    const stalled: Request[] = [];
+    const mirror = standInMirror(http, largeEdition(SIZE), {
+      answerRange: (request, start) => {
+        if (start === span) return new Response('missing', { status: 404 });
+        stalled.push(request);
+        return stallingResponder(request);
+      },
+    });
+    let settled = false;
+    const pending = read()
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    /**
+     * Short of the first retry backoff: a retried 404, or a range left running, holds
+     * the read open.
+     */
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(true);
+    const error = (await pending) as McpError;
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'text_file_not_found',
+      recovery: { hint: expect.any(String) },
+    });
+    expect(mirror.requests).toHaveLength(5);
+    expect(stalled).toHaveLength(3);
+    expect(stalled.every((request) => request.signal.aborted)).toBe(true);
+  });
+
+  it('retries a transient failure on one range alone within the allowance', async () => {
+    vi.useFakeTimers();
+    let failures = 0;
+    const third = 2 * span;
+    const mirror = standInMirror(http, largeEdition(SIZE), {
+      answerRange: (_request, start) =>
+        start === third && failures++ === 0 ? new Response('busy', { status: 503 }) : undefined,
+    });
+    const pending = read();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const entry = await pending;
+    const ranges = rangesOf(SIZE);
+    expect(mirror.requests.map((request) => request.headers.get('range'))).toEqual([
+      null,
+      ...ranges,
+      ranges[2],
+    ]);
+    expect(entry.text.match(/😀/gu)).toHaveLength(3);
+  });
+
+  it("gives up at once on a range retry that cannot fit the read's remaining allowance", async () => {
+    vi.useFakeTimers();
+    standInMirror(http, largeEdition(SIZE), {
+      answerRange: () => new Response('busy', { status: 503 }),
+    });
+    let settled = false;
+    /** A 1 s allowance cannot hold the first backoff, which waits at least 1.5 s. */
+    const pending = read({ deadlineAtMs: Date.now() + 1_000 })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(true);
+    expect(await pending).toMatchObject({
+      message: `Failed to fetch text for book ${BOOK_ID}: the Gutenberg mirror remained temporarily unavailable.`,
+      data: { reason: 'text_fetch_failed' },
+    });
+  });
+
+  it('holds every range to the deadline the caller passed, not a fresh allowance', async () => {
+    vi.useFakeTimers();
+    const stalled: Request[] = [];
+    standInMirror(http, largeEdition(SIZE), {
+      answerRange: (request) => {
+        stalled.push(request);
+        return stallingResponder(request);
+      },
+    });
+    let settled = false;
+    const pending = read({ deadlineAtMs: Date.now() + 10_000 })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(settled).toBe(true);
+    expect(await pending).toMatchObject({
+      message: `The Gutenberg text download for book ${BOOK_ID} did not finish in time.`,
+      data: { reason: 'text_fetch_failed' },
+    });
+    expect(stalled).toHaveLength(4);
+    expect(stalled.every((request) => request.signal.aborted)).toBe(true);
+  });
+
+  it('fails at the allowance with every range in flight, aborting them all', async () => {
+    vi.useFakeTimers();
+    const stalled: Request[] = [];
+    standInMirror(http, largeEdition(SIZE), {
+      answerRange: (request) => {
+        stalled.push(request);
+        return stallingResponder(request);
+      },
+    });
+    let settled = false;
+    const pending = read()
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(49_900);
+    expect(settled).toBe(false);
+    expect(stalled).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await pending).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: `The Gutenberg text download for book ${BOOK_ID} did not finish in time.`,
+      data: { reason: 'text_fetch_failed', recovery: { hint: expect.any(String) } },
+    });
+    expect(stalled.every((request) => request.signal.aborted)).toBe(true);
+  });
+
+  it('stays a cancellation when the caller cancels with every range in flight', async () => {
+    const controller = new AbortController();
+    const stalled: Request[] = [];
+    const mirror = standInMirror(http, largeEdition(SIZE), {
+      answerRange: (request) => {
+        stalled.push(request);
+        if (stalled.length === 4) controller.abort('client cancelled the read');
+        return stallingResponder(request);
+      },
+    });
+    const error = (await read({ ctx: context(controller.signal) }).catch(
+      (e: unknown) => e,
+    )) as McpError;
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.data).not.toHaveProperty('reason');
+    expect(stalled.every((request) => request.signal.aborted)).toBe(true);
+    expect(mirror.requests).toHaveLength(5);
+  });
+
+  it('fails a file over 40 MiB before requesting any range, without retry or caching', async () => {
+    vi.useFakeTimers();
+    const mirror = standInMirror(http, new TextEncoder().encode(MIRROR_FILE), {
+      bytesPerTick: 16,
+      headers: { 'content-length': String(40 * MIB + 1) },
+    });
+    const ctx = context();
+    const set = vi.spyOn(ctx.state, 'set');
+    const pending = read({ ctx }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(50_001);
+    const error = (await pending) as McpError;
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+    expect(error.message).toBe(
+      `The text file for book ${BOOK_ID} is 41,943,041 bytes, more than the 41,943,040 this server can download within one call.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'text_too_large',
+      retryable: false,
+      recovery: { hint: TOO_LARGE_RECOVERY },
+    });
+    expect(mirror.requests).toHaveLength(1);
+    expect(mirror.cancelled).toBe(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('reads a file of exactly 40 MiB in ranges', async () => {
+    const mirror = standInMirror(http, new TextEncoder().encode(MIRROR_FILE), {
+      headers: { 'content-length': String(40 * MIB) },
+      answerRange: () => new Response('missing', { status: 404 }),
+    });
+    await expect(read()).rejects.toMatchObject({ data: { reason: 'text_file_not_found' } });
+    expect(mirror.requests.map((request) => request.headers.get('range'))).toEqual([
+      null,
+      ...rangesOf(40 * MIB),
+    ]);
+  });
+
+  it('carries text_too_large to both tool surfaces as not retryable', async () => {
+    const config = {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: MIRROR_HOST,
+      mirrorPath: ':memory:',
+    };
+    const storage = createInMemoryStorage();
+    initGutendexService({} as AppConfig, storage, config);
+    initGutenbergTextService({} as AppConfig, storage, config);
+    http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(book)) });
+    standInMirror(http, new TextEncoder().encode(MIRROR_FILE), {
+      headers: { 'content-length': String(52_026_421) },
+    });
+    const call = runToolContract(
+      gutenbergGetText,
+      { id: BOOK_ID },
+      { context: { signal: teardown.signal } },
+    );
+    reads.push(call);
+    const result = await call;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidRequest,
+        message: `The text file for book ${BOOK_ID} is 52,026,421 bytes, more than the 41,943,040 this server can download within one call.`,
+        data: {
+          reason: 'text_too_large',
+          retryable: false,
+          recovery: { hint: TOO_LARGE_RECOVERY },
+        },
+      },
+    });
+    const wire = JSON.stringify(result.content);
+    expect(wire).toContain('52,026,421 bytes');
+    expect(wire).toContain('repeating the call will not help');
+    expect(wire).toContain('not retryable');
+    expect(JSON.stringify(result)).not.toMatch(/mirror.test|cache\/epub/);
   });
 });
 
@@ -1182,11 +1813,7 @@ describe('GutenbergTextService — table source whitespace', () => {
       '<table>\n<tr>\n<td>\n<p>one</p>\n<p>two</p>\n</td>\n<td>x</td>\n</tr>\n</table>',
       '\n\none\n\ntwo\n\n\tx\n',
     ],
-    [
-      'a line break',
-      '<table>\n<tr>\n<td>a<br>b</td>\n<td>c</td>\n</tr>\n</table>',
-      '\na\n\nb\tc\n',
-    ],
+    ['a line break', '<table>\n<tr>\n<td>a<br>b</td>\n<td>c</td>\n</tr>\n</table>', '\na\nb\tc\n'],
   ])('breaks a row at block markup inside a cell: %s', async (_name, html, text) => {
     expect(await storedHtml(html)).toBe(text);
   });
@@ -1417,10 +2044,7 @@ describe('GutenbergTextService — whitespace-only lines on the HTML path', () =
     const storage = createInMemoryStorage();
     initGutendexService({} as AppConfig, storage, config);
     initGutenbergTextService({} as AppConfig, storage, config);
-    http.route({
-      match: `https://catalog.test/books/${BOOK_ID}/`,
-      respond: () => Response.json(htmlOnlyBook),
-    });
+    http.route({ match: RESOLVED_RDF_URL, respond: () => new Response(bookRdf(htmlOnlyBook)) });
     http.route({ match: RESOLVED_HTML_URL, respond: () => new Response(html) });
   }
 
@@ -1478,4 +2102,159 @@ describe('GutenbergTextService — whitespace-only lines on the HTML path', () =
     },
     15000,
   );
+});
+
+// ── Line breaks on the HTML path (#60) ───────────────────────────────────────
+
+describe('GutenbergTextService — line breaks on the HTML path', () => {
+  let http: FetchMockHarness;
+
+  const storedHtml = async (html: string) => (await fetchHtmlEntry(http, html)).text;
+
+  beforeEach(() => {
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+  });
+
+  it('reads verse lines one newline apart, with a blank line between stanzas', async () => {
+    const html = [
+      '<html><body>',
+      '<p>*** START OF THE PROJECT GUTENBERG EBOOK POEMS ***</p>',
+      '<div class="poem"><div class="stanza">',
+      '<span class="i0"><i>Though fancy and the might of rhyme,</i></span><br>',
+      '<span class="i1"><i>That turneth like the tide,</i></span><br>',
+      '<span class="i0"><i>Have borne me many a musing time,</i></span><br>',
+      '<span class="i1"><i>Beloved, from thy side,</i></span><br>',
+      '</div><div class="stanza">',
+      '<span class="i0"><i>Ah yet, I pray thee, deem not, Sweet,</i></span><br>',
+      '</div></div>',
+      '<p>*** END OF THE PROJECT GUTENBERG EBOOK POEMS ***</p>',
+      '</body></html>',
+    ].join('\n');
+    expect(await storedHtml(html)).toBe(
+      [
+        'Though fancy and the might of rhyme,',
+        'That turneth like the tide,',
+        'Have borne me many a musing time,',
+        'Beloved, from thy side,',
+        '',
+        'Ah yet, I pray thee, deem not, Sweet,',
+      ].join('\n'),
+    );
+  });
+
+  it.each([
+    [
+      'a line break and its source newline as one newline',
+      '<p>line one<br>\nline two<br>\n<br>\nline four</p>',
+      '\n\nline one\nline two\n\nline four\n\n',
+    ],
+    [
+      'the ASCII whitespace after a line break, across inline tags, as nothing',
+      '<p>a<br> \t\r\n\f<i> </i>&#x2003;b</p>',
+      '\n\na\n b\n\n',
+    ],
+    [
+      'only the whitespace before the next visible text',
+      '<p>a<br>\n  b  \n  c</p>',
+      '\n\na\nb  \n  c\n\n',
+    ],
+    [
+      '&nbsp; indentation after a line break',
+      '<p>a<br>\n&nbsp;&nbsp;b</p>',
+      '\n\na\n\xa0\xa0b\n\n',
+    ],
+    ['a stray </br> and a self-closing <br/>', '<p>a</br>\nb<br/>\nc</p>', '\n\na\nb\nc\n\n'],
+    [
+      'whitespace before inline markup later in a broken line',
+      '<p>a<br>b <i>c</i> d</p>',
+      '\n\na\nb c d\n\n',
+    ],
+    ['the source newline after a line break inside pre', '<pre>a<br>\nb</pre>', '\n\na\n\nb\n\n'],
+    ['a line break after pre closes', '<pre> x </pre><p>a<br>\n  b</p>', '\n\n x \n\na\nb\n\n'],
+    [
+      'a hard-wrapped paragraph without line breaks',
+      '<p>one\n  two\nthree</p>',
+      '\n\none\n  two\nthree\n\n',
+    ],
+  ])('reads %s', async (_name, html, text) => {
+    expect(await storedHtml(html)).toBe(text);
+  });
+
+  /**
+   * Thread CPU per `processRaw` call over sizes doubling from 5k characters to
+   * `maxSize`. Each size is timed three times, each beside a fresh baseline:
+   * the least time stays under an absolute bound, the least growth under 256.
+   */
+  function boundsGrowth(
+    build: (units: number) => string,
+    unitLength: number,
+    expectedLength: (units: number) => number,
+    maxSize: number,
+  ): void {
+    const service = makeService() as unknown as {
+      processRaw(raw: string, format: string): { text: string };
+    };
+    const perCall = (units: number, calls: number) => {
+      const raw = build(units);
+      let text = '';
+      const start = process.threadCpuUsage();
+      for (let i = 0; i < calls; i++) text = service.processRaw(raw, 'text/html').text;
+      const elapsed = process.threadCpuUsage(start);
+      expect(text).toHaveLength(expectedLength(units));
+      return (elapsed.user + elapsed.system) / calls;
+    };
+    const BASE = 5000;
+    const baseUnits = Math.ceil(BASE / unitLength);
+    perCall(baseUnits, 32);
+    for (let size = 2 * BASE; size <= maxSize; size *= 2) {
+      const units = Math.ceil(size / unitLength);
+      const calls = Math.max(1, Math.round((32 * BASE) / size));
+      let least = Number.POSITIVE_INFINITY;
+      let leastGrowth = Number.POSITIVE_INFINITY;
+      for (let trial = 0; trial < 3; trial++) {
+        const baseline = perCall(baseUnits, 32);
+        const cpu = perCall(units, calls);
+        least = Math.min(least, cpu);
+        leastGrowth = Math.min(leastGrowth, cpu / Math.max(baseline, 1));
+      }
+      expect(least).toBeLessThan(250_000);
+      expect(leastGrowth).toBeLessThan(256);
+    }
+  }
+
+  it.each([
+    ['dense line breaks', '<br>', () => 2],
+    ['a line break before each indented line', 'x<br>\n  ', (units: number) => 2 * units],
+    ['breaks throughout', '<br>  \r\n', () => 2],
+  ])(
+    'bounds CPU growth reading %s over a 64× span',
+    (_name, unit, expectedLength) => {
+      boundsGrowth((units) => unit.repeat(units), unit.length, expectedLength, 320_000);
+    },
+    30000,
+  );
+
+  it('bounds CPU growth reading one long line ending in a line break over a 64× span', () => {
+    boundsGrowth(
+      (units) => `<p>${'§1 x'.repeat(units)}<br>\ny`,
+      4,
+      (units) => 4 * units + 4,
+      320_000,
+    );
+  }, 30000);
+
+  /** One whitespace node past 80k characters crosses Bun's regex slow mode: span 16×. */
+  it('bounds CPU growth reading one whitespace run after a line break over a 16× span', () => {
+    boundsGrowth(
+      (units) => `<br>${' \t\r\n\f'.repeat(units)}x`,
+      5,
+      () => 2,
+      80_000,
+    );
+  }, 30000);
 });

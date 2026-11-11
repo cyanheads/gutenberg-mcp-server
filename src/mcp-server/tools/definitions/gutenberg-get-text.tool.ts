@@ -130,6 +130,15 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
       thrownBy: 'service',
     },
     {
+      reason: 'text_too_large',
+      code: JsonRpcErrorCode.InvalidRequest,
+      when: 'The text file is larger than this server can download within one call (over 40 MiB).',
+      recovery:
+        "This book's text file is too large for this server to download within one call; repeating the call will not help. Search gutenberg_search_books for another edition of the work.",
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
       reason: 'invalid_text_response',
       code: JsonRpcErrorCode.SerializationError,
       when: 'The mirror returned an empty document, HTML on a plain-text path, or recognizable server failure document.',
@@ -175,7 +184,7 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'text_fetch_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Gutenberg mirror had a transient failure or the download did not finish within the remaining upstream allowance.',
+      when: 'The Gutenberg mirror had a transient failure, answered a byte-range read inconsistently, or the download did not finish within the remaining upstream allowance.',
       recovery:
         'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
@@ -184,10 +193,18 @@ export const gutenbergGetText = tool('gutenberg_get_text', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The catalog lookup that precedes reading a book did not answer within the time this server allows.',
+      when: 'The catalog record lookup that precedes reading a book did not answer, or returned an unreadable record, within the time this server allows.',
       recovery:
-        'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry later, or call gutenberg_get_book to confirm the catalog is answering again.',
+        "This failed before any text was requested: the content mirror did not supply the book's catalog record. Retry later; the same mirror serves the text, so reading cannot succeed until it answers again.",
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The catalog record lookup that precedes reading a book was refused outright rather than failing temporarily.',
+      recovery:
+        "Repeating the request will not help: the content mirror refused the book's catalog record before any text was requested. Ask the server operator to check the configured content mirror.",
       thrownBy: 'service',
     },
   ],

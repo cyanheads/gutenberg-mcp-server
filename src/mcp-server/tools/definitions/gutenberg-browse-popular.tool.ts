@@ -174,10 +174,18 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one browse.',
+      when: 'The Project Gutenberg catalog did not answer, or returned an unreadable page, within the time this server allows for one browse.',
       recovery:
         'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and a narrower filter will not help.',
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The live Project Gutenberg catalog refused the browse outright rather than failing temporarily.',
+      recovery:
+        'Repeating the browse will not help, and another filter is refused the same way. Ask the server operator to check the configured catalog address or initialize the local catalog mirror.',
       thrownBy: 'service',
     },
   ],

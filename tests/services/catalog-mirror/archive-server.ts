@@ -24,6 +24,10 @@ export interface ArchiveServer {
   failWith(status: number | null): void;
   /** GET requests served so far — how a test tells a re-harvest from a short-circuit. */
   gets: number;
+  /** HEAD requests served so far — the freshness probe a refresh sends first. */
+  heads: number;
+  /** Resolves once the next GET has sent its headers, so a test can act mid-download. */
+  nextGet(): Promise<void>;
   /** Swap in a different fixture archive and timestamp, as a daily rebuild would. */
   serve(fixture: string, lastModified: Date): void;
   /** Dribble the body out in 64-byte chunks so a mid-download abort is observable. */
@@ -39,6 +43,7 @@ export async function startArchiveServer(
   let stamp = lastModified;
   let failure: number | null = null;
   let throttled = false;
+  let getWaiters: Array<() => void> = [];
 
   const server: Server = createServer((req, res) => {
     if (failure !== null) {
@@ -53,11 +58,15 @@ export async function startArchiveServer(
     res.setHeader('Content-Length', String(body.byteLength));
     res.setHeader('Last-Modified', stamp.toUTCString());
     if (req.method === 'HEAD') {
+      control.heads += 1;
       res.writeHead(200).end();
       return;
     }
     control.gets += 1;
     res.writeHead(200);
+    res.flushHeaders();
+    for (const resolve of getWaiters) resolve();
+    getWaiters = [];
     if (!throttled) {
       res.end(body);
       return;
@@ -83,6 +92,10 @@ export async function startArchiveServer(
   const control: ArchiveServer = {
     baseUrl: `http://127.0.0.1:${port}`,
     gets: 0,
+    heads: 0,
+    nextGet() {
+      return new Promise<void>((resolve) => getWaiters.push(resolve));
+    },
     serve(next, nextStamp) {
       body = readFileSync(new URL(next, FIXTURE_DIR));
       stamp = nextStamp;

@@ -2,8 +2,8 @@
 
 **Server:** gutenberg-mcp-server
 **Version:** 0.3.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -246,26 +246,32 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ## Structure
 
-Discovery uses the ready RDF mirror with case- and accent-insensitive substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live, where matching is upstream-defined. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with source-aware guidance naming only supplied filters and normalized typed criteria. Optional mirror language diagnostics cannot invalidate an answered search. MIME type/subtype prefixes are lowercased while parameter suffix case stays literal; tri-state copyright filters apply on both sources. Browse continuation preserves filters and repeats page 1 if its cap cuts the first page. Schema v5 normalizes stored titles with the FTS trigger active, then rewrites all five catalog-folded fields with it suspended, preserving null translator columns without harvesting. The mirror-only `translator` filter fails with `translator_requires_mirror` on live fallback. Standalone catalog network work retains 15 seconds; reading shares one absolute 50-second upstream allowance across catalog and text. Cache writes are awaited best effort and cancellation stays unchanged.
+Discovery uses the ready RDF mirror with case- and accent-insensitive substring predicates before counts, ordering and paging; cold/unreadable mirrors fall back live to Gutendex, where matching is upstream-defined. A single-book lookup (`gutenberg_get_book`, and the record `gutenberg_get_text` reads first) goes mirror, then cache, then the book's per-book RDF on the content mirror (`<GUTENBERG_TEXT_BASE_URL>/cache/epub/<id>/pg<id>.rdf`), never Gutendex; an RDF 404 is `not_found`. Every catalog fetch shares one classifier: other 4xx except 408 and 429, and 501, are the non-retryable `catalog_rejected`; 408, 429, 5xx, timeouts, and an unparsable 2xx are `catalog_unavailable`. Text over 8 MiB (uncompressed, with `Accept-Ranges: bytes` and a strong ETag) reads as four parallel byte ranges; a declared size over 40 MiB fails with `text_too_large`. Every query word applies locally; live fallback rejects more than four words with `query_requires_mirror`. `ids: []` selects nothing without catalog I/O. Empty discovery succeeds with source-aware guidance naming only supplied filters and normalized typed criteria. Optional mirror language diagnostics cannot invalidate an answered search. MIME type/subtype prefixes are lowercased while parameter suffix case stays literal; tri-state copyright filters apply on both sources. Browse continuation preserves filters and repeats page 1 if its cap cuts the first page. Schema v5 normalizes stored titles with the FTS trigger active, then rewrites all five catalog-folded fields with it suspended, preserving null translator columns without harvesting. The mirror-only `translator` filter fails with `translator_requires_mirror` on live fallback. Standalone catalog network work retains 15 seconds; reading shares one absolute 50-second upstream allowance across catalog and text. Cache writes are awaited best effort and cancellation stays unchanged. The parsed per-book record caches at `gutenberg/book/v1/{id}` and extracted text at `gutenberg/text/v4/{id}`; the text key version moves whenever the pipeline changes stored text, such as HTML `<br>` reading as one newline. A text file's 404 is `text_file_not_found`; 501 and other 4xx but 408 and 429 are `text_fetch_rejected`.
 
 ```text
 src/
   index.ts                              # createApp() entry point — registers tools, inits services
   config/
-    server-config.ts                    # URL overrides, catalog-mirror path and refresh schedule
+    server-config.ts                    # Gutendex and content-mirror URLs, per-user default catalog-mirror path, refresh schedule
   services/
+    best-effort-cache.ts                # Awaited cache write that never fails an otherwise successful read
+    upstream-deadline.ts                # One wall-clock budget per upstream call; exhausted budget becomes a declared reason
+    upstream-rejection.ts               # isRejection(status): which upstream statuses are permanent refusals
     gutendex/
-      gutendex-service.ts               # Gutendex catalog API client
+      gutendex-service.ts               # Catalog reads: mirror, live Gutendex search/browse, per-book RDF lookup
       types.ts                          # Catalog domain types
     catalog-mirror/
       catalog-mirror-service.ts         # Local SQLite+FTS5 catalog mirror — instance, RDF ingester, read helpers
       catalog-mirror-store.ts           # Mirror schema and Book <-> row mapping
+      mirror-cli.ts                     # `gutenberg-mcp-server mirror init|refresh|verify`, dispatched from index.ts
       rdf-archive-stream.ts             # Bulk rdf-files.tar.bz2 download, decompression, and untar
       rdf-book-parser.ts                # Per-book RDF/XML into the normalized Book shape
     gutenberg-text/
       gutenberg-text-service.ts         # Plain-text retrieval, boilerplate stripping, caching, chunking
       types.ts                          # Text service types
   mcp-server/
+    tools/
+      discovery-criteria.ts             # Shared search/browse criteria schema, filter echo, and empty-result notice
     tools/definitions/
       gutenberg-search-books.tool.ts    # Search catalog by title/author/topic/translator/language
       gutenberg-get-book.tool.ts        # Fetch full metadata by ID
@@ -361,9 +367,10 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
 | `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, the published `skills/` tree (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
-| `bun run mirror:init` | Full harvest of the Project Gutenberg catalog into the local mirror. Resumable; run out-of-band, never at startup |
-| `bun run mirror:refresh` | Re-harvest when the bulk RDF archive has been rebuilt; no-op when it has not |
-| `bun run mirror:verify` | Mirror row count, sync state, and SQLite integrity. Exits non-zero on a failed integrity check |
+| `gutenberg-mcp-server mirror <action>` | The mirror lifecycle from an installed package under Node or Bun (`npx -y @cyanheads/gutenberg-mcp-server mirror init`); prints `mirror path: <absolute path>` first. Default path `$XDG_DATA_HOME/gutenberg-mcp-server/gutenberg-catalog.sqlite` (`~/.local/share` when unset, empty, or relative) |
+| `bun run mirror:init` | `bun ./dist/index.js mirror init` (build first): full harvest of the Project Gutenberg catalog into the local mirror. Resumable; run out-of-band, never at startup |
+| `bun run mirror:refresh` | `mirror refresh`: re-harvest when the bulk RDF archive has been rebuilt; no-op when it has not |
+| `bun run mirror:verify` | `mirror verify`: row count, sync state, and SQLite integrity. Exits 1 on a failed integrity check, or when no mirror exists at the path (creating nothing) |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
@@ -380,7 +387,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose, and so do the catalog-mirror lifecycle scripts, re-included under `/scripts/*` by `!/scripts/…` lines. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) at a package's root — a deeper `skills/`, such as the MCP SDK's `dist/ext/skills/` modules, is runtime code and ships; platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose; `/scripts/` does not, since the `mirror` commands compile into `dist/`. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

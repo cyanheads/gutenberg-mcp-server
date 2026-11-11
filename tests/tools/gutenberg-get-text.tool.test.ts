@@ -137,7 +137,7 @@ describe('gutenbergGetText — happy path', () => {
     });
     mockTextService.fetchAndCacheText.mockImplementation(
       async (book: Book, id: number, ctx: Context) => {
-        await ctx.state.set(`gutenberg/text/v3/${id}`, {
+        await ctx.state.set(`gutenberg/text/v4/${id}`, {
           ...cachedText,
           title: 'Peter Pan : $b [Peter and Wendy]',
         });
@@ -1236,5 +1236,213 @@ describe('GutenbergTextService.resolveTextUrl — mirror sourcing', () => {
     expect(err).toBeInstanceOf(McpError);
     expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
     expect((err as McpError).data).toMatchObject({ reason: 'no_text_format' });
+  });
+});
+
+// ── Catalog record lookup through the real services (#58, #59) ───────────────
+//
+// A book the local mirror cannot answer is resolved from its own RDF record on the
+// content mirror before any text is requested. These run the real catalog and text
+// services behind a strict fetch fake; the classifier is tabled in the service suite.
+
+describe('gutenbergGetText — catalog record lookup', () => {
+  const MIRROR = 'https://mirror.test';
+  const recordUrl = (id: number) => `${MIRROR}/cache/epub/${id}/pg${id}.rdf`;
+  const textUrl = (id: number) => `${MIRROR}/cache/epub/${id}/pg${id}.txt`;
+  const BOOK_TEXT = [
+    '*** START OF THE PROJECT GUTENBERG EBOOK MOTHERS STILL ***',
+    'The first line of the story.',
+    '*** END OF THE PROJECT GUTENBERG EBOOK MOTHERS STILL ***',
+  ].join('\n');
+
+  /** The committed RDF record for `id`, optionally rewritten for a case. */
+  async function record(id: number, edit = (xml: string) => xml): Promise<string> {
+    const { readFileSync } = await import('node:fs');
+    const fixture = new URL(`../fixtures/catalog-mirror/rdf/pg${id}.rdf`, import.meta.url);
+    return edit(readFileSync(fixture, 'utf8'));
+  }
+
+  /** The recovery this tool declares for a reason. */
+  function declaredFor(reason: string): string | undefined {
+    return (gutenbergGetText.errors as readonly { reason: string; recovery: string }[]).find(
+      (entry) => entry.reason === reason,
+    )?.recovery;
+  }
+
+  /** Put the real catalog and text services behind the module mocks, under a strict fetch fake. */
+  async function realServices() {
+    const { createFetchMock, createInMemoryStorage } = await import(
+      '@cyanheads/mcp-ts-core/testing'
+    );
+    const { GutendexService } = await vi.importActual<
+      typeof import('@/services/gutendex/gutendex-service.js')
+    >('@/services/gutendex/gutendex-service.js');
+    const config = {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: MIRROR,
+      mirrorPath: ':memory:',
+    };
+    const storage = createInMemoryStorage();
+    const catalog = new GutendexService({} as never, storage, config);
+    const text = new GutenbergTextService({} as never, storage, config);
+    mockGutendexService.getBook.mockImplementation(
+      (id: number, ctx: Context, deadlineAtMs?: number) => catalog.getBook(id, ctx, deadlineAtMs),
+    );
+    mockTextService.fetchAndCacheText.mockImplementation(
+      (book: Book, id: number, ctx: Context, deadlineAtMs?: number) =>
+        text.fetchAndCacheText(book, id, ctx, deadlineAtMs),
+    );
+    const http = createFetchMock();
+    http.install();
+    return {
+      http,
+      [Symbol.dispose]() {
+        http.restore();
+        mockGutendexService.getBook.mockReset();
+        mockTextService.fetchAndCacheText.mockReset();
+        vi.useRealTimers();
+      },
+    };
+  }
+
+  it('reads a book the local mirror lacks once its RDF record resolves', async () => {
+    using services = await realServices();
+    const xml = await record(79964);
+    services.http.route({ match: recordUrl(79964), respond: () => new Response(xml) });
+    services.http.route({ match: textUrl(79964), respond: () => new Response(BOOK_TEXT) });
+
+    const result = await runToolContract(gutenbergGetText, { id: 79964 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      id: 79964,
+      title: 'Mothers still',
+      text: 'The first line of the story.',
+    });
+    expect(services.http.calls.map((call) => call.request.url)).toEqual([
+      recordUrl(79964),
+      textUrl(79964),
+    ]);
+  });
+
+  it('fails an ID with no RDF record as not_found before any text is requested', async () => {
+    using services = await realServices();
+    services.http.route({
+      match: recordUrl(99999999),
+      respond: () => new Response('<html>404 Not Found</html>', { status: 404 }),
+    });
+
+    const result = await runToolContract(gutenbergGetText, { id: 99999999 });
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'not_found', recovery: { hint: declaredFor('not_found') } },
+      },
+    });
+    expect(services.http.calls.map((call) => call.request.url)).toEqual([recordUrl(99999999)]);
+  });
+
+  it('fails a refused record as catalog_rejected before any text is requested, naming no host', async () => {
+    using services = await realServices();
+    services.http.route({
+      match: recordUrl(79964),
+      respond: () => new Response('<html>403 Forbidden</html>', { status: 403 }),
+    });
+
+    const result = await runToolContract(gutenbergGetText, { id: 79964 });
+
+    const hint = declaredFor('catalog_rejected');
+    expect(hint).toEqual(expect.any(String));
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.Forbidden,
+        message: 'The Project Gutenberg catalog rejected the lookup for book 79964.',
+        data: { reason: 'catalog_rejected', recovery: { hint } },
+      },
+    });
+    expect(readBack(contentText(result)).text).toBe(
+      `Error: The Project Gutenberg catalog rejected the lookup for book 79964.\n\nRecovery: ${hint}\n\n(reason catalog_rejected)`,
+    );
+    for (const leak of ['mirror.test', '://', '403 Forbidden']) {
+      expect(JSON.stringify(result)).not.toContain(leak);
+    }
+    expect(services.http.calls).toHaveLength(1);
+  });
+
+  it('reports an unanswered record lookup as catalog_unavailable, blaming the content mirror', async () => {
+    using services = await realServices();
+    vi.useFakeTimers();
+    services.http.route({
+      match: recordUrl(79964),
+      respond: () => new Response('busy', { status: 503 }),
+    });
+
+    const pending = runToolContract(gutenbergGetText, { id: 79964 });
+    await vi.advanceTimersByTimeAsync(16_000);
+    const result = await pending;
+
+    const hint = declaredFor('catalog_unavailable');
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'The Project Gutenberg catalog did not respond for book 79964.',
+        data: { reason: 'catalog_unavailable', recovery: { hint } },
+      },
+    });
+    // The record and the text come from one host, so the hint cannot exonerate it.
+    expect(hint).not.toContain('not the file server');
+    expect(services.http.calls.every((call) => call.request.url === recordUrl(79964))).toBe(true);
+  });
+
+  it('passes a caller cancel during the record lookup through unchanged', async () => {
+    using services = await realServices();
+    const controller = new AbortController();
+    services.http.route({
+      match: recordUrl(79964),
+      respond: (request) => {
+        controller.abort('client gave up');
+        return new Promise<Response>((_resolve, reject) => {
+          if (request.signal.aborted) reject(request.signal.reason);
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true,
+          });
+        });
+      },
+    });
+
+    const result = await runToolContract(
+      gutenbergGetText,
+      { id: 79964 },
+      { context: { signal: controller.signal } },
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(services.http.calls.map((call) => call.request.url)).toEqual([recordUrl(79964)]);
+  });
+
+  it.each([
+    [
+      'audio_book',
+      (xml: string) => xml.replace('<rdf:value>Text</rdf:value>', '<rdf:value>Sound</rdf:value>'),
+    ],
+    [
+      'no_text_format',
+      (xml: string) =>
+        xml
+          .replace('>text/plain; charset=utf-8<', '>text/plain; charset=us-ascii<')
+          .replace('>text/html<', '>application/epub+zip<'),
+    ],
+  ])('keeps %s for a record read from the RDF', async (reason, edit) => {
+    using services = await realServices();
+    const xml = await record(79964, edit);
+    services.http.route({ match: recordUrl(79964), respond: () => new Response(xml) });
+
+    const result = await runToolContract(gutenbergGetText, { id: 79964 });
+
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason } } });
+    expect(services.http.calls.map((call) => call.request.url)).toEqual([recordUrl(79964)]);
   });
 });

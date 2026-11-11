@@ -1,16 +1,18 @@
 /**
  * @fileoverview Tests the catalog-mirror read path on `GutendexService.getBook`: a
- * populated mirror answers without any upstream call, a mirror that does not hold the
- * ID falls through to the live catalog, and a broken mirror degrades to the live path
- * rather than failing the request. The mirror is harvested for real from a loopback
- * archive, so a hit proves the stored row round-trips back into a `Book`.
+ * populated mirror answers without any upstream call, and a mirror that does not hold
+ * the ID — or is not ready — falls through to the book's own RDF record on the content
+ * mirror, never to Gutendex. The mirror is harvested for real from a loopback archive,
+ * so a hit proves the stored row round-trips back into a `Book`, and the RDF path is
+ * checked field for field against the row harvested from the same file.
  * @module tests/services/gutendex/gutendex-mirror-read-path.test
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
   createInMemoryStorage,
@@ -32,10 +34,23 @@ const ARCHIVE_BUILD = new Date('2026-08-21T14:40:50Z');
 const CATALOG_BASE = 'https://catalog.test/books/';
 /** Present in `catalog-sample.tar.bz2`; 45304 is the fixture carrying an editor. */
 const MIRRORED_ID = 45304;
-/** Absent from the sample archive — the staleness case. */
-const UNMIRRORED_ID = 1342;
+/** Absent from the sample archive — posted after its build, the staleness case. */
+const UNMIRRORED_ID = 79964;
 /** The sample archive's translated record: Anna Karenina, translated by Constance Garnett. */
 const TRANSLATED_ID = 1399;
+/** Every record in `catalog-sample.tar.bz2`, each also committed as `rdf/pg<id>.rdf`. */
+const ARCHIVED_IDS = [84, 1000, 1073, 1399, 10001, 10056, 10137, 45304];
+const RDF_DIR = new URL('../../fixtures/catalog-mirror/rdf/', import.meta.url);
+
+/** Where a lookup the mirror cannot answer reads the book's RDF on the content mirror. */
+function rdfUrl(id: number): string {
+  return `${archive.baseUrl}/cache/epub/${id}/pg${id}.rdf`;
+}
+
+/** The committed copy of one per-book RDF document. */
+function readRdf(id: number): string {
+  return readFileSync(new URL(`pg${id}.rdf`, RDF_DIR), 'utf8');
+}
 
 let archive: ArchiveServer;
 let workDir: string;
@@ -84,31 +99,60 @@ describe('GutendexService.getBook — catalog mirror read path', () => {
     expect(http.calls).toHaveLength(0);
   });
 
-  it('falls through to the live catalog for an ID the mirror does not hold', async () => {
+  it("falls through to the book's RDF on the content mirror for an ID the mirror does not hold", async () => {
     http.route({
-      match: new RegExp(`^${CATALOG_BASE}${UNMIRRORED_ID}/$`),
-      respond: () =>
-        Response.json({
-          id: UNMIRRORED_ID,
-          title: 'Pride and Prejudice',
-          authors: [],
-          translators: [],
-          subjects: [],
-          bookshelves: [],
-          languages: ['en'],
-          copyright: false,
-          media_type: 'Text',
-          download_count: 1,
-          formats: {},
-        }),
+      match: rdfUrl(UNMIRRORED_ID),
+      respond: () => new Response(readRdf(UNMIRRORED_ID)),
     });
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
 
     const book = await makeGutendex().getBook(UNMIRRORED_ID, ctx);
 
-    expect(book.title).toBe('Pride and Prejudice');
-    expect(http.calls).toHaveLength(1);
+    expect(book).toMatchObject({ id: UNMIRRORED_ID, title: 'Mothers still', source_notes: [] });
+    expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(UNMIRRORED_ID)]);
   });
+
+  it('answers an ID the content mirror has no record for as not_found, with no Gutendex request', async () => {
+    http.route({
+      match: rdfUrl(99999999),
+      respond: () => new Response('<html>404 Not Found</html>', { status: 404 }),
+    });
+    const ctx = createMockContext({ errors: gutenbergGetBook.errors });
+
+    const error = await makeGutendex()
+      .getBook(99999999, ctx)
+      .catch((err: unknown) => err);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
+    expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(99999999)]);
+  });
+
+  it.each(ARCHIVED_IDS)(
+    'reads %i from its RDF exactly as the mirror row harvested from the same file',
+    async (id) => {
+      const gutendex = makeGutendex();
+      const fromMirror = await gutendex.getBook(id, createMockContext());
+      expect(http.calls).toHaveLength(0);
+
+      /** A store that never completed a sync is not ready, so every lookup reads the RDF. */
+      const cold = initCatalogMirrorService({
+        gutendexBaseUrl: CATALOG_BASE,
+        gutenbergTextBaseUrl: archive.baseUrl,
+        mirrorPath: join(workDir, 'cold.sqlite'),
+      });
+      try {
+        http.route({ match: rdfUrl(id), respond: () => new Response(readRdf(id)) });
+        const fromRecord = await gutendex.getBook(id, createMockContext());
+        expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(id)]);
+        expect(fromRecord).toEqual(fromMirror);
+      } finally {
+        await cold.close();
+      }
+    },
+  );
 });
 
 describe('GutendexService.searchBooks — harvested translators', () => {

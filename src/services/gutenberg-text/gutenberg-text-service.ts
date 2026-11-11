@@ -8,14 +8,25 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  fetchWithTimeout,
+  type RetryAttempt,
+  requestContextService,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { SAXParser } from 'parse5-sax-parser';
 import type { ServerConfig } from '@/config/server-config.js';
 import { bestEffortCache } from '@/services/best-effort-cache.js';
 import { type Book, foldSearchText } from '@/services/gutendex/types.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
+import { isRejection } from '@/services/upstream-rejection.js';
 import type { CachedText, FetchedText, PassageMatch, SourceFormat, TextChunk } from './types.js';
 
 /**
@@ -24,6 +35,26 @@ import type { CachedText, FetchedText, PassageMatch, SourceFormat, TextChunk } f
  */
 export const READING_UPSTREAM_BUDGET_MS = 50_000;
 const TEXT_TTL_SECONDS = 86_400; // 24 hours
+
+/**
+ * The mirror caps each connection at about 0.3–0.4 MB/s, so one carries 15–20 MB
+ * within the allowance. An uncompressed body above this size reads as parallel
+ * byte ranges instead; one at or below it keeps the single request.
+ */
+const RANGED_READ_MIN_BYTES = 8 * 1024 * 1024;
+/** Each parallel range keeps 0.87–0.96× the single-connection rate on the mirror. */
+const RANGE_COUNT = 4;
+/**
+ * Four connections at 0.25 MB/s for 40 s, leaving the rest of the allowance to the
+ * catalog lookup and latency. A file declared larger cannot finish within one call.
+ */
+const MAX_TEXT_BYTES = 40 * 1024 * 1024;
+
+/** How a first response's body is read: as it arrived, or as parallel ranges. */
+type FirstResponse = { mediaType: string | undefined } & (
+  | { kind: 'whole'; bytes: Uint8Array }
+  | { kind: 'ranged'; etag: string; size: number }
+);
 
 /** Regex matching the START marker (multiline, case from real files). */
 const START_RE = /^\*{3} START OF THE PROJECT GUTENBERG EBOOK .+? \*{3}$/m;
@@ -80,7 +111,6 @@ const BLOCK_TAGS = new Set([
   'h5',
   'h6',
   'hr',
-  'br',
   'li',
   'blockquote',
   'pre',
@@ -89,6 +119,9 @@ const BLOCK_TAGS = new Set([
 /** End tags that leave a cell, explicitly or by closing what holds it. */
 const CELL_END_TAGS = new Set(['td', 'th', 'tr', 'caption']);
 
+/** The ASCII whitespace HTML defines, leading a text node. */
+const LEADING_ASCII_WHITESPACE = /^[\t\n\f\r ]+/;
+
 /**
  * Tokenize HTML once: references decode once, independently of presentation.
  * Whitespace-only text between table, row, and cell tags is source layout: left
@@ -96,12 +129,20 @@ const CELL_END_TAGS = new Set(['td', 'th', 'tr', 'caption']);
  * innermost last, so a nested table's cells never end the cell that holds it;
  * `outerRowCells` sets aside the row count a nested table interrupts.
  * A tokenizer sees no implied end tags, so a row or the table closes a cell too.
+ *
+ * A line break is one newline, as in the plain-text editions. Outside `<pre>`, the
+ * ASCII whitespace after it up to the next visible text is the source's own line
+ * break and indentation, which a browser drops at a line start, so it emits
+ * nothing; `&nbsp;` indentation is not ASCII whitespace and stays. Other source
+ * whitespace stays as it is, so hard-wrapped prose and cells keep their lines.
  */
 function htmlToText(html: string): string {
   const chunks: string[] = [];
   const parser = new SAXParser();
   let excluded: string | undefined;
   let templateDepth = 0;
+  let preDepth = 0;
+  let afterBreak = false;
   let cellsInRow = 0;
   const outerRowCells: number[] = [];
   const cellOpen: boolean[] = [];
@@ -110,6 +151,11 @@ function htmlToText(html: string): string {
   };
   const rowBoundary = () => {
     if (!chunks.at(-1)?.endsWith('\n')) chunks.push('\n');
+  };
+  /** A `<br>`, or the stray `</br>` a browser also reads as one. */
+  const lineBreak = () => {
+    chunks.push('\n');
+    if (preDepth === 0) afterBreak = true;
   };
   parser.on('startTag', ({ tagName }) => {
     if (excluded) return;
@@ -120,8 +166,11 @@ function htmlToText(html: string): string {
     if (templateDepth > 0) return;
     if (tagName === 'title' || tagName === 'script' || tagName === 'style') {
       excluded = tagName;
+    } else if (tagName === 'br') {
+      lineBreak();
     } else if (BLOCK_TAGS.has(tagName)) {
       chunks.push('\n\n');
+      if (tagName === 'pre') preDepth += 1;
     } else if (tagName === 'tr' || tagName === 'table') {
       rowBoundary();
       if (tagName === 'table') {
@@ -149,7 +198,11 @@ function htmlToText(html: string): string {
       return;
     }
     if (tagName === 'tr' || tagName === 'table') rowBoundary();
-    else if (BLOCK_TAGS.has(tagName)) chunks.push('\n\n');
+    else if (tagName === 'br') lineBreak();
+    else if (BLOCK_TAGS.has(tagName)) {
+      chunks.push('\n\n');
+      if (tagName === 'pre' && preDepth > 0) preDepth -= 1;
+    }
     if (tagName === 'table') {
       cellOpen.pop();
       cellsInRow = outerRowCells.pop() ?? 0;
@@ -160,7 +213,13 @@ function htmlToText(html: string): string {
   parser.on('text', ({ text }) => {
     if (excluded || templateDepth > 0) return;
     if (cellOpen.at(-1) === false && !/\S/.test(text)) return;
-    chunks.push(text);
+    let visible = text;
+    if (afterBreak && preDepth === 0) {
+      visible = text.replace(LEADING_ASCII_WHITESPACE, '');
+      if (!visible) return;
+    }
+    afterBreak = false;
+    chunks.push(visible);
   });
   parser.end(html);
   return chunks.join('');
@@ -212,6 +271,42 @@ function rewriteToHttpsHtmlCachePath(id: number, baseUrl: string): string {
   return `${base}/cache/epub/${id}/pg${id}-images.html`;
 }
 
+/** The body size a response declares, when it declares one. */
+function declaredBytes(headers: Headers): number | undefined {
+  const length = headers.get('content-length')?.trim();
+  return length && /^\d+$/.test(length) ? Number(length) : undefined;
+}
+
+/** Byte ranges address the bytes on the wire, which only identity transfer shares with the body. */
+function transfersIdentity(headers: Headers): boolean {
+  const encoding = headers.get('content-encoding')?.trim().toLowerCase();
+  return !encoding || encoding === 'identity';
+}
+
+/**
+ * The strong ETag that lets a response's body be read as byte ranges, or undefined
+ * when it cannot be: a compressed body, no `Accept-Ranges: bytes`, or no ETag
+ * strong enough for `If-Range`.
+ */
+function rangeValidator(headers: Headers): string | undefined {
+  if (!transfersIdentity(headers)) return;
+  const units = headers.get('accept-ranges')?.toLowerCase().split(',') ?? [];
+  if (!units.some((unit) => unit.trim() === 'bytes')) return;
+  const etag = headers.get('etag');
+  return etag && !etag.startsWith('W/') ? etag : undefined;
+}
+
+/**
+ * A range answer that does not continue the first response. Repeating the range
+ * returns the same answer, so it is not retried; a fresh read can still succeed.
+ */
+function inconsistentRange(id: number, answer: string): McpError {
+  return serviceUnavailable(
+    `The Gutenberg mirror answered a byte range of book ${id}'s text with ${answer}.`,
+    { retryable: false },
+  );
+}
+
 export class GutenbergTextService {
   private readonly textBaseUrl: string;
 
@@ -252,22 +347,163 @@ export class GutenbergTextService {
   }
 
   /**
-   * Fetch the raw bytes for a book URL and decode as UTF-8. The mirror serves
-   * generated UTF-8 for both the plain-text and HTML cache files.
+   * One request for a book's mirror file. A permanent refusal becomes its contract
+   * reason and is never retried: 404 `text_file_not_found`; 501 and any other 4xx
+   * but 408 and 429 `text_fetch_rejected`. Anything else, a caller cancel
+   * included, passes through for the retry ladder to judge.
+   */
+  private async request(
+    url: string,
+    id: number,
+    ctx: Context,
+    { signal, remainingMs }: RetryAttempt,
+    headers?: Record<string, string>,
+  ): Promise<Response> {
+    const reqCtx = requestContextService.createRequestContext({
+      parentContext: ctx,
+      operation: 'GutenbergTextService.fetchRaw',
+    });
+    try {
+      return await fetchWithTimeout(url, remainingMs, reqCtx, {
+        signal,
+        ...(headers && { headers }),
+      });
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      const status = error instanceof McpError ? error.data?.status : undefined;
+      if (typeof status !== 'number' || !isRejection(status)) throw error;
+      const missing = status === 404;
+      const reason = missing ? 'text_file_not_found' : 'text_fetch_rejected';
+      throw new McpError(
+        missing ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.Forbidden,
+        `The Gutenberg mirror ${missing ? 'has no text file' : 'rejected the text request'} for book ${id}.`,
+        { reason, ...ctx.recoveryFor(reason) },
+        { cause: error },
+      );
+    }
+  }
+
+  /**
+   * Read bytes `start`–`end` of the file into their place in `bytes`. The answer
+   * must continue the first response exactly — `206`, the requested
+   * `Content-Range` of the same total, identity transfer, and that many bytes —
+   * or the read fails rather than assemble mixed or compressed bytes.
+   */
+  private async readRange(
+    url: string,
+    id: number,
+    ctx: Context,
+    etag: string,
+    bytes: Uint8Array,
+    start: number,
+    end: number,
+    attempt: RetryAttempt,
+  ): Promise<void> {
+    const response = await this.request(url, id, ctx, attempt, {
+      Range: `bytes=${start}-${end}`,
+      'Accept-Encoding': 'identity',
+      'If-Range': etag,
+    });
+    const contentRange = response.headers.get('content-range');
+    const range = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(contentRange?.trim() ?? '');
+    const answer =
+      response.status !== 206
+        ? `HTTP ${response.status}`
+        : !range ||
+            Number(range[1]) !== start ||
+            Number(range[2]) !== end ||
+            Number(range[3]) !== bytes.length
+          ? `Content-Range ${contentRange ?? 'missing'} for bytes ${start}-${end}/${bytes.length}`
+          : transfersIdentity(response.headers)
+            ? undefined
+            : `Content-Encoding ${response.headers.get('content-encoding')}`;
+    if (answer) {
+      await response.body?.cancel();
+      throw inconsistentRange(id, answer);
+    }
+    let offset = start;
+    const reader = response.body?.getReader();
+    while (reader) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (offset + value.length > end + 1) {
+        await reader.cancel();
+        throw inconsistentRange(id, `more than the ${end - start + 1} bytes it named`);
+      }
+      bytes.set(value, offset);
+      offset += value.length;
+    }
+    if (offset !== end + 1) {
+      throw inconsistentRange(id, `${offset - start} of the ${end - start + 1} bytes it named`);
+    }
+  }
+
+  /**
+   * Read a `size`-byte file as `RANGE_COUNT` parallel ranges into one buffer, so the
+   * mirror's per-connection cap applies to each part rather than the whole file.
+   * Each range retries alone under the read's one deadline and signal; the first
+   * to fail aborts the rest, and every range settles before the read does.
+   */
+  private async fetchRanges(
+    url: string,
+    id: number,
+    ctx: Context,
+    { etag, size }: { etag: string; size: number },
+    deadlineAtMs: number,
+    signal: AbortSignal,
+  ): Promise<Uint8Array> {
+    signal.throwIfAborted();
+    const bytes = new Uint8Array(size);
+    const span = Math.ceil(size / RANGE_COUNT);
+    const siblings = new AbortController();
+    const rangeSignal = AbortSignal.any([signal, siblings.signal]);
+    const failures: unknown[] = [];
+    await Promise.all(
+      Array.from({ length: RANGE_COUNT }, (_, index) => {
+        const start = index * span;
+        const end = Math.min(size, start + span) - 1;
+        return withRetry(
+          (attempt) => this.readRange(url, id, ctx, etag, bytes, start, end, attempt),
+          {
+            operation: 'GutenbergTextService.fetchRange',
+            baseDelayMs: 2000,
+            deadlineMs: Math.max(0, deadlineAtMs - Date.now()),
+            signal: rangeSignal,
+          },
+        ).catch((error: unknown) => {
+          failures.push(error);
+          siblings.abort();
+        });
+      }),
+    );
+    if (failures.length > 0) throw failures[0];
+    return bytes;
+  }
+
+  /**
+   * Fetch a book's mirror file and decode it as UTF-8, once, after every byte has
+   * arrived. The mirror serves generated UTF-8 for both the plain-text and HTML
+   * cache files.
    *
-   * The whole ladder runs under one budget, and an exhausted budget surfaces as
-   * `text_fetch_failed` with the calling tool's declared recovery hint. The
-   * message names the book rather than the resolved cache-path URL, which
-   * carries the operator's configured mirror host; the original error stays on
-   * `cause` for server-side logs. A caller cancel passes through unchanged.
+   * The first request is the ordinary GET, which keeps HTML's compressed transfer.
+   * A declared size over `MAX_TEXT_BYTES` fails at once as `text_too_large`. An
+   * uncompressed, rangeable body over `RANGED_READ_MIN_BYTES` is cancelled and read
+   * as parallel byte ranges instead (`fetchRanges`).
+   *
+   * Every request, retry, and backoff runs under one deadline, and an exhausted
+   * one surfaces as `text_fetch_failed` with the calling tool's declared recovery
+   * hint. The message names the book rather than the resolved cache-path URL,
+   * which carries the operator's configured mirror host; the original error stays
+   * on `cause` for server-side logs. A caller cancel passes through unchanged.
    */
   private async fetchRaw(
     url: string,
     id: number,
     format: SourceFormat,
     ctx: Context,
-    budgetMs: number,
+    deadlineAtMs: number,
   ): Promise<string> {
+    const budgetMs = Math.max(0, deadlineAtMs - Date.now());
     const response = await withUpstreamDeadline(
       ctx,
       {
@@ -276,47 +512,41 @@ export class GutenbergTextService {
         deadlineMessage: `The Gutenberg text download for book ${id} did not finish in time.`,
         reason: 'text_fetch_failed',
       },
-      (signal) =>
-        withRetry(
-          async ({ signal: attemptSignal, remainingMs }) => {
-            const reqCtx = requestContextService.createRequestContext({
-              parentContext: ctx,
-              operation: 'GutenbergTextService.fetchRaw',
-            });
-            try {
-              const response = await fetchWithTimeout(url, remainingMs, reqCtx, {
-                signal: attemptSignal,
-              });
-              const buffer = await response.arrayBuffer();
-              return {
-                raw: new TextDecoder('utf-8').decode(buffer),
-                mediaType: response.headers
-                  .get('content-type')
-                  ?.split(';')[0]
-                  ?.trim()
-                  .toLowerCase(),
-              };
-            } catch (error) {
-              if (ctx.signal.aborted) throw error;
-              if (
-                error instanceof McpError &&
-                typeof error.data?.status === 'number' &&
-                error.data.status >= 400 &&
-                error.data.status < 500 &&
-                error.data.status !== 408 &&
-                error.data.status !== 429
-              ) {
-                const missing = error.data.status === 404;
-                const reason = missing ? 'text_file_not_found' : 'text_fetch_rejected';
-                throw new McpError(
-                  missing ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.Forbidden,
-                  `The Gutenberg mirror ${missing ? 'has no text file' : 'rejected the text request'} for book ${id}.`,
-                  { reason, ...ctx.recoveryFor(reason) },
-                  { cause: error },
-                );
-              }
-              throw error;
+      async (signal) => {
+        const first = await withRetry(
+          async (attempt): Promise<FirstResponse> => {
+            const response = await this.request(url, id, ctx, attempt);
+            const mediaType = response.headers
+              .get('content-type')
+              ?.split(';')[0]
+              ?.trim()
+              .toLowerCase();
+            const size = declaredBytes(response.headers);
+            if (size !== undefined && size > MAX_TEXT_BYTES) {
+              await response.body?.cancel();
+              throw new McpError(
+                JsonRpcErrorCode.InvalidRequest,
+                `The text file for book ${id} is ${size.toLocaleString('en-US')} bytes, more than the ${MAX_TEXT_BYTES.toLocaleString('en-US')} this server can download within one call.`,
+                {
+                  reason: 'text_too_large',
+                  retryable: false,
+                  ...ctx.recoveryFor('text_too_large'),
+                },
+              );
             }
+            const etag =
+              size !== undefined && size > RANGED_READ_MIN_BYTES
+                ? rangeValidator(response.headers)
+                : undefined;
+            if (size !== undefined && etag) {
+              await response.body?.cancel();
+              return { kind: 'ranged', mediaType, etag, size };
+            }
+            return {
+              kind: 'whole',
+              mediaType,
+              bytes: new Uint8Array(await response.arrayBuffer()),
+            };
           },
           {
             operation: 'GutenbergTextService.fetchRaw',
@@ -324,7 +554,16 @@ export class GutenbergTextService {
             deadlineMs: budgetMs,
             signal,
           },
-        ),
+        );
+        return {
+          mediaType: first.mediaType,
+          raw: new TextDecoder('utf-8').decode(
+            first.kind === 'ranged'
+              ? await this.fetchRanges(url, id, ctx, first, deadlineAtMs, signal)
+              : first.bytes,
+          ),
+        };
+      },
     );
     // Mirrors can label valid books as generic binary or another incorrect MIME
     // type. A header alone cannot establish that the literary body is invalid.
@@ -394,8 +633,9 @@ export class GutenbergTextService {
 
   /**
    * Fetch, process, and cache the full stripped text for a book.
-   * Throws no_text_format if no usable format; `fetchRaw` throws text_fetch_failed
-   * when the mirror ladder exhausts its budget.
+   * Throws no_text_format if no usable format; `fetchRaw` throws text_too_large for
+   * a file larger than one call can download, and text_fetch_failed when the
+   * mirror ladder exhausts its budget.
    */
   async fetchAndCacheText(
     book: Book,
@@ -403,7 +643,7 @@ export class GutenbergTextService {
     ctx: Context,
     deadlineAtMs = Date.now() + READING_UPSTREAM_BUDGET_MS,
   ): Promise<CachedText> {
-    const cacheKey = `gutenberg/text/v3/${id}`;
+    const cacheKey = `gutenberg/text/v4/${id}`;
 
     const cached = await ctx.state.get<CachedText>(cacheKey);
     if (cached) {
@@ -428,23 +668,24 @@ export class GutenbergTextService {
 
     // Storage reads remain failures of their own; rejected cache writes below
     // are best effort. Neither is classified as an upstream outage.
-    const raw = await this.fetchRaw(
-      resolved.url,
-      id,
-      resolved.format,
-      ctx,
-      Math.max(0, deadlineAtMs - Date.now()),
-    );
+    const raw = await this.fetchRaw(resolved.url, id, resolved.format, ctx, deadlineAtMs);
 
     const processed = this.processRaw(raw, resolved.format);
 
-    /** Match complete, short server templates rather than keywords within prose. */
-    const document = processed.text.trim().replace(/\s+/g, ' ');
+    /**
+     * Match complete, short server templates rather than keywords within prose. Only
+     * converted HTML is checked, so the whitespace-collapsing pass never runs over a
+     * large plain-text book.
+     */
+    const trimmed = processed.text.trim();
+    const htmlDocument = resolved.format === 'text/html' ? trimmed.replace(/\s+/g, ' ') : undefined;
     const failureTemplate =
       /^(?:Service unavailable[;.]? retry later\.?|(?:404 Not Found|403 Forbidden|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-out)(?: (?:nginx|Apache(?: Server)?))?)$/i;
     if (
-      !document ||
-      (resolved.format === 'text/html' && document.length <= 200 && failureTemplate.test(document))
+      !trimmed ||
+      (htmlDocument !== undefined &&
+        htmlDocument.length <= 200 &&
+        failureTemplate.test(htmlDocument))
     ) {
       throw this.invalidResponse(id, ctx);
     }

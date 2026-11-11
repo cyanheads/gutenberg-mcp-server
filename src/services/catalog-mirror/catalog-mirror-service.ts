@@ -5,13 +5,16 @@
  * Gutendex is a single live upstream on the catalog read path, and it has been down
  * for extended stretches. This service owns the mirror instance, the RDF ingester, and
  * the hydrated read helpers the tool layer serves from; the live Gutendex client stays
- * in place as the fallback for a cold mirror or an ID the mirror does not hold.
+ * in place as the fallback for search and browse on a cold mirror, and a book lookup the
+ * mirror cannot answer reads the book's own RDF record from the content mirror instead.
  *
  * A full harvest costs a ~121 MB download and ~79,000 XML parses, so it runs
- * out-of-band via the `mirror:init` / `mirror:refresh` scripts rather than at startup.
+ * out-of-band via `gutenberg-mcp-server mirror init` / `mirror refresh` (see `mirror-cli.ts`)
+ * rather than at startup.
  * @module services/catalog-mirror/catalog-mirror-service
  */
 
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   defineMirror,
   type Mirror,
@@ -66,7 +69,7 @@ export interface CatalogQueryResult {
   total: number;
 }
 
-/** Health report for the mirror database, as `mirror:verify` prints it. */
+/** Health report for the mirror database, as `mirror verify` prints it. */
 export interface CatalogMirrorReport {
   /**
    * Resume position of an interrupted run. Read from the persisted sync state rather
@@ -117,7 +120,7 @@ export class CatalogMirrorService {
     return this.mirror.ready();
   }
 
-  /** Sync state for `mirror:verify` and operational reporting. */
+  /** Sync state for `mirror verify` and operational reporting. */
   status(): Promise<MirrorStatus> {
     return this.mirror.status();
   }
@@ -149,24 +152,14 @@ export class CatalogMirrorService {
   }
 
   /**
-   * Fetch books by Gutenberg ID, preserving the requested order and skipping IDs the
-   * mirror does not hold — the caller decides whether a miss falls through to the live
-   * catalog.
-   *
-   * Uses a filtered query rather than the store's `getByIds`, which takes string keys
-   * and re-keys its results by the raw column value: against this table's `INTEGER`
-   * primary key the SQL matches but the string-to-number lookup does not, so every row
-   * is dropped. A numeric `in` filter has no such mismatch.
+   * Fetch books by Gutenberg ID, preserving the requested order (a repeated ID at each
+   * position) and skipping IDs the mirror does not hold — the caller decides whether a
+   * miss falls through to the book's RDF record. The store compares each string ID with the
+   * `INTEGER` key as `id = ?` does, and an empty list reads nothing.
    */
   async getBooks(ids: number[]): Promise<Book[]> {
-    if (ids.length === 0) return [];
-    const { rows } = await this.mirror.query({
-      filters: [{ column: 'id', op: 'in', value: ids }],
-      limit: ids.length,
-      offset: 0,
-    });
-    const byId = new Map(rows.map((row) => [Number(row.id), bookFromRow(row)]));
-    return ids.map((id) => byId.get(id)).filter((book): book is Book => book !== undefined);
+    const rows = await this.mirror.getByIds(ids.map(String));
+    return rows.map(bookFromRow);
   }
 
   /**
@@ -370,8 +363,11 @@ export function getCatalogMirrorService(): CatalogMirrorService {
   return _service;
 }
 
-/** Whether a refresh cron was registered this process, so teardown knows what to unwind. */
-let _refreshScheduled = false;
+/**
+ * The registered refresh cron's shutdown controller and its in-flight run, so
+ * teardown knows what to unwind. The scheduler never overlaps ticks of one job.
+ */
+let _refresh: { controller: AbortController; run: Promise<unknown> | undefined } | undefined;
 
 /**
  * Register and start the in-process refresh cron, when one is configured.
@@ -379,34 +375,55 @@ let _refreshScheduled = false;
  * Off unless `GUTENBERG_MIRROR_REFRESH_CRON` is set, because a refresh is a full
  * re-harvest — the archive publishes no incremental delta — and that is a poor
  * neighbour for a process that is also serving requests. Deployments with a host
- * scheduler should run `mirror:refresh` out-of-band instead.
+ * scheduler should run `gutenberg-mcp-server mirror refresh` out-of-band instead.
+ *
+ * A tick that finds another process syncing the same store (`sync_locked`, e.g. a
+ * `mirror refresh` run) skips; the scheduler logs anything else it rethrows.
  */
 export async function startCatalogMirrorRefresh(serverConfig: ServerConfig): Promise<void> {
   const schedule = serverConfig.mirrorRefreshCron;
   if (schedule === undefined) return;
   const service = getCatalogMirrorService();
+  const refresh: NonNullable<typeof _refresh> = {
+    controller: new AbortController(),
+    run: undefined,
+  };
+  const { signal } = refresh.controller;
   await schedulerService.schedule(
     REFRESH_JOB_ID,
     schedule,
     async () => {
-      await service.runSync({ mode: 'refresh' });
+      refresh.run = service.runSync({ mode: 'refresh', signal }).catch((err: unknown) => {
+        if (signal.aborted) return; // stopped for shutdown; the runner logged it at info
+        if (!(err instanceof McpError) || err.data?.reason !== 'sync_locked') throw err;
+      });
+      try {
+        await refresh.run;
+      } finally {
+        refresh.run = undefined;
+      }
     },
     'Re-harvest the Project Gutenberg catalog mirror from the bulk RDF archive.',
   );
   schedulerService.start(REFRESH_JOB_ID);
-  _refreshScheduled = true;
+  _refresh = refresh;
 }
 
 /**
- * Stop and unregister the refresh cron, when one was registered.
+ * Stop and unregister the refresh cron, when one was registered, and wait for an
+ * in-flight refresh to stop.
  *
  * The framework clears every scheduled job during shutdown, but only after the
  * `teardown` hook has run — and teardown is where the mirror's SQLite handle is
- * released. Stopping the job first is what keeps a refresh tick from re-opening
- * the database on a process that is on its way out.
+ * released. Removing the job keeps a new tick from re-opening the database on a
+ * process that is on its way out; aborting and awaiting the running one lets it
+ * record its resumable state before the handle closes, instead of re-opening it.
  */
-export function stopCatalogMirrorRefresh(): void {
-  if (!_refreshScheduled) return;
+export async function stopCatalogMirrorRefresh(): Promise<void> {
+  if (_refresh === undefined) return;
+  const { controller, run } = _refresh;
+  _refresh = undefined;
   schedulerService.remove(REFRESH_JOB_ID);
-  _refreshScheduled = false;
+  controller.abort();
+  await run;
 }

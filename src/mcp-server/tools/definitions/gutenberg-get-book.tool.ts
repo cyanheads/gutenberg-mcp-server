@@ -125,9 +125,7 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       ),
     summaries: z
       .array(z.string())
-      .describe(
-        'Every source-provided summary: sorted on the RDF mirror, upstream order on live fallback. Empty when there are none.',
-      ),
+      .describe('Every source-provided summary, sorted. Empty when there are none.'),
     formats: z
       .record(z.string(), z.string())
       .describe(
@@ -151,10 +149,18 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one lookup.',
+      when: 'The Project Gutenberg catalog did not answer, or returned an unreadable record, within the time this server allows for one lookup.',
       recovery:
         'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The Project Gutenberg catalog refused the lookup outright rather than failing temporarily.',
+      recovery:
+        'Repeating the lookup will not help. If other IDs are refused the same way, ask the server operator to check the configured content mirror.',
       thrownBy: 'service',
     },
   ],

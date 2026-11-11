@@ -4,11 +4,20 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createInMemoryStorage,
+  createMockContext,
+  type FetchMockHarness,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import fc from 'fast-check';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergBrowsePopular } from '@/mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
+import type { SearchParams } from '@/services/gutendex/types.js';
 import {
   ACTIVE_MARKDOWN,
   contentText,
@@ -763,5 +772,61 @@ describe('gutenbergBrowsePopular — catalog_unavailable', () => {
     });
     expect(text).toContain('Recovery:');
     expect(text).not.toContain('gutendex.com');
+  });
+});
+
+// ── A refused live catalog through the real service (#58) ────────────────────
+
+describe('gutenbergBrowsePopular — catalog_rejected', () => {
+  let http: FetchMockHarness;
+
+  beforeEach(async () => {
+    const { GutendexService } = await vi.importActual<
+      typeof import('@/services/gutendex/gutendex-service.js')
+    >('@/services/gutendex/gutendex-service.js');
+    const service = new GutendexService({} as AppConfig, createInMemoryStorage(), {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: 'https://mirror.test',
+      mirrorPath: ':memory:',
+    });
+    mockGutendexService.searchBooks.mockImplementation((params: SearchParams, ctx: Context) =>
+      service.searchBooks(params, ctx),
+    );
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    mockGutendexService.searchBooks.mockReset();
+  });
+
+  it('fails a live HTTP 401 after one request, with the declared recovery and no host on either surface', async () => {
+    http.route({
+      match: /^https:\/\/catalog\.test\//,
+      respond: () => new Response('<html>401 Unauthorized</html>', { status: 401 }),
+    });
+
+    const result = await runToolContract(gutenbergBrowsePopular, { languages: ['fr'] });
+
+    const hint = (
+      gutenbergBrowsePopular.errors as readonly { reason: string; recovery: string }[]
+    ).find((entry) => entry.reason === 'catalog_rejected')?.recovery;
+    expect(hint).toEqual(expect.any(String));
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.Forbidden,
+        message: 'The Project Gutenberg catalog rejected the search request.',
+        data: { reason: 'catalog_rejected', recovery: { hint } },
+      },
+    });
+    expect(readBack(contentText(result)).text).toBe(
+      `Error: The Project Gutenberg catalog rejected the search request.\n\nRecovery: ${hint}\n\n(reason catalog_rejected)`,
+    );
+    for (const leak of ['catalog.test', '://', 'Unauthorized']) {
+      expect(JSON.stringify(result)).not.toContain(leak);
+    }
+    expect(http.calls).toHaveLength(1);
   });
 });

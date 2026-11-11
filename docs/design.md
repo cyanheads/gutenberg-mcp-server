@@ -23,7 +23,7 @@ None. This is a data-access server without recurring agent interaction patterns 
 
 ## Overview
 
-An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. Catalog discovery uses the ready local RDF mirror, with the keyless Gutendex API as fallback; metadata uses the mirror when it holds the requested ID. Full book text comes from Gutenberg's content mirror. `gutenberg_get_text` fetches, strips boilerplate, and returns the literary content of a work in context-budget-safe chunks. No API key required.
+An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. Catalog discovery uses the ready local RDF mirror, with the keyless Gutendex API as fallback for search and popularity browse; a single-book lookup uses the mirror when it holds the requested ID, and otherwise reads the book's own RDF record from Gutenberg's content mirror. Full book text comes from the same content mirror. `gutenberg_get_text` fetches, strips boilerplate, and returns the literary content of a work in context-budget-safe chunks. No API key required.
 
 **Audience:** Readers, students, literature researchers, writers, and AI agents doing textual analysis, quote-finding, or close reading of classic works.
 
@@ -55,10 +55,10 @@ An MCP server wrapping Project Gutenberg's 78,000+ public-domain ebook corpus. C
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
 | `CatalogMirrorService` | Local SQLite catalog harvested from Gutenberg's bulk RDF archive | Catalog discovery and metadata through `GutendexService` |
-| `GutendexService` | Local catalog mirror with Gutendex API fallback (`gutendex.com/books/`) | All four tools; `gutenberg_get_text` uses it for metadata |
+| `GutendexService` | Local catalog mirror; live Gutendex API (`gutendex.com/books/`) for search and popularity browse; the content mirror's per-book RDF record (`/cache/epub/N/pgN.rdf`) for single-book lookups | All four tools; `gutenberg_get_book` and `gutenberg_get_text` use it for metadata |
 | `GutenbergTextService` | Project Gutenberg content mirror (`gutenberg.pglaf.org` by default) | `gutenberg_get_text` |
 
-The catalog mirror persists across restarts; live catalog and text responses use tenant-scoped caching. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
+The catalog mirror persists across restarts; live catalog, per-book record, and text responses use tenant-scoped caching. Every catalog fetch shares one failure classifier: 404 is `not_found` (a book) or `page_out_of_range` (a search page); any other 4xx except 408 and 429, and 501, is the non-retryable `catalog_rejected`; 408, 429, 5xx, timeouts, network errors, and a 2xx body that does not parse are `catalog_unavailable` and retried. Each upstream call runs its retry ladder under a shared wall-clock budget (`src/services/upstream-deadline.ts`), which also owns the single place where an exhausted budget becomes a declared `ServiceUnavailable` reason and a caller cancel passes through untouched.
 
 ---
 
@@ -66,12 +66,12 @@ The catalog mirror persists across restarts; live catalog and text responses use
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `GUTENDEX_BASE_URL` | No | Override Gutendex base URL (default: `https://gutendex.com/books/`). Gutendex is self-hostable — useful for private instances. |
-| `GUTENBERG_TEXT_BASE_URL` | No | Override the Project Gutenberg content mirror (default: `https://gutenberg.pglaf.org`, a mirror that permits automated access — see Design Decisions). |
-| `GUTENBERG_MIRROR_PATH` | No | Persistent SQLite catalog path shared by the server and lifecycle commands (default: `./.mirror/gutenberg-catalog.sqlite`). |
-| `GUTENBERG_MIRROR_REFRESH_CRON` | No | Optional in-process refresh schedule; a host scheduler running `mirror:refresh` is preferred. |
+| `GUTENDEX_BASE_URL` | No | Override Gutendex base URL (default: `https://gutendex.com/books/`), used for search and popularity browse when the local mirror cannot answer. Gutendex is self-hostable — useful for private instances. |
+| `GUTENBERG_TEXT_BASE_URL` | No | Override the Project Gutenberg content mirror (default: `https://gutenberg.pglaf.org`, a mirror that permits automated access — see Design Decisions). Serves book text, the bulk catalog archive, and per-book catalog records. |
+| `GUTENBERG_MIRROR_PATH` | No | Persistent SQLite catalog path shared by the server and the `mirror` commands (default: `$XDG_DATA_HOME/gutenberg-mcp-server/gutenberg-catalog.sqlite`, `~/.local/share` when `XDG_DATA_HOME` is unset, empty, or relative). The Docker image sets `/usr/src/app/.mirror/gutenberg-catalog.sqlite`. |
+| `GUTENBERG_MIRROR_REFRESH_CRON` | No | Optional in-process refresh schedule; a host scheduler running `gutenberg-mcp-server mirror refresh` is preferred. |
 
-No API keys. URL overrides support self-hosted Gutendex instances and Gutenberg mirrors.
+No API keys. URL overrides support self-hosted Gutendex instances and Gutenberg mirrors. A blank or unsubstituted `${…}` value (an MCPB blank answer) reads as unset, so the defaults hold. `gutenberg-mcp-server mirror init|refresh|verify` (`src/services/catalog-mirror/mirror-cli.ts`) runs the mirror lifecycle from the compiled entry and prints `mirror path: <absolute path>` first.
 
 ---
 
@@ -95,7 +95,7 @@ Each step is independently testable. The text service can be unit-tested with a 
 
 **Purpose:** Search and filter the Project Gutenberg catalog. Entry point for finding books.
 
-**Source:** the ready local RDF mirror; cold/unreadable mirrors fall back to `GET https://gutendex.com/books/?search=...&topic=...&languages=...&sort=...&page=...&mime_type=...&copyright=...`. Parameterized SQLite predicates apply before both totals and page selection, with ID tie-breaks for popular ordering. Empty results remain local answers. Metadata retains its per-ID fallback.
+**Source:** the ready local RDF mirror; cold/unreadable mirrors fall back to `GET https://gutendex.com/books/?search=...&topic=...&languages=...&sort=...&page=...&mime_type=...&copyright=...`. Parameterized SQLite predicates apply before both totals and page selection, with ID tie-breaks for popular ordering. Empty results remain local answers. A search with `ids` keeps this mirror-or-Gutendex path, with no per-ID RDF fan-out.
 
 Every nonblank whitespace-separated query word must occur in a title or author name as a literal substring. The mirror's catalog fold ignores case and accents (NFKD, combining-mark removal, then æ→ae, œ→oe, ø→o, ß→ss, ł→l, ð→d, þ→th). Query, translator and topic use this fold; words that fold empty are removed and entirely empty filters are unset. Passage `find` retains its separate accent-sensitive fold. Live matching is upstream-defined and rejects more than four words with `query_requires_mirror` before any request.
 
@@ -182,9 +182,16 @@ tool('gutenberg_search_books', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one search.',
+      when: 'The Project Gutenberg catalog did not answer, or returned an unreadable page, within the time this server allows for one search.',
       recovery: 'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and a different query will not help.',
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The live Project Gutenberg catalog refused the search outright rather than failing temporarily.',
+      recovery: 'Repeating the search will not help, and another query is refused the same way. Ask the server operator to check the configured catalog address or initialize the local catalog mirror.',
       thrownBy: 'service',
     },
   ],
@@ -199,7 +206,7 @@ tool('gutenberg_search_books', {
 
 **Purpose:** Fetch the complete metadata record for a single book by its Gutenberg ID, including the full formats map needed before fetching text.
 
-**Upstream call:** `GET https://gutendex.com/books/{id}/`
+**Source:** the ready local RDF mirror; on a miss, `GET <GUTENBERG_TEXT_BASE_URL>/cache/epub/{id}/pg{id}.rdf`, the book's own record on the content mirror, parsed with the same `parseBookRdf` the mirror harvest uses. The RDF is authoritative for existence: a 404 is `not_found` with no Gutendex request. A 200 that does not parse to a book is `catalog_unavailable`. The parsed record is cached for one hour at `gutenberg/book/v1/{id}`.
 
 ```ts
 tool('gutenberg_get_book', {
@@ -238,7 +245,7 @@ tool('gutenberg_get_book', {
     source_notes: z.array(z.string()).nullable().describe('Direct RDF bibliographic notes, in order. [] means inspected empty; null means unavailable.'),
     is_readable: z.boolean().describe('Eligible Text record with UTF-8 plain text, or HTML without audio formats; mirror file existence is not guaranteed.'),
     summary: z.string().nullable().describe('First entry of summaries, not necessarily primary, or null when the source has none.'),
-    summaries: z.array(z.string()).describe('Every source-provided summary: sorted on the RDF mirror, upstream order on live fallback. Empty when there are none.'),
+    summaries: z.array(z.string()).describe('Every source-provided summary, sorted. Empty when there are none.'),
     formats: z.record(z.string(), z.string()).describe('Map of MIME type to download URL. Key types: "text/plain; charset=utf-8" (preferred for gutenberg_get_text), "text/html", "application/epub+zip", "image/jpeg" (cover). Not every format is present for every book.'),
     has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; HTML-only editions may have is_readable=true.'),
   }),
@@ -253,9 +260,16 @@ tool('gutenberg_get_book', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Project Gutenberg catalog did not answer within the time this server allows for one lookup.',
+      when: 'The Project Gutenberg catalog did not answer, or returned an unreadable record, within the time this server allows for one lookup.',
       recovery: 'The catalog is unreachable or too slow right now. Retry later; if it keeps failing, the catalog service itself is degraded and another ID will fail the same way.',
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The Project Gutenberg catalog refused the lookup outright rather than failing temporarily.',
+      recovery: 'Repeating the lookup will not help. If other IDs are refused the same way, ask the server operator to check the configured content mirror.',
       thrownBy: 'service',
     },
   ],
@@ -271,8 +285,8 @@ tool('gutenberg_get_book', {
 **Purpose:** Retrieve the literary content of a book as plain text, stripped of the Gutenberg license boilerplate, with offset/limit chunking for context-budget management.
 
 **Upstream calls:**
-1. `GET https://gutendex.com/books/{id}/` — resolve which format (`text/plain; charset=utf-8` or `text/html`) the book has, from the formats map
-2. `GET https://gutenberg.pglaf.org/cache/epub/{id}/pg{id}.txt` (or `pg{id}-images.html` for the HTML fallback) — fetch the full file from the configured Project Gutenberg content mirror. The URL is built directly from the book ID, never from Gutendex's raw format URL — the formats map's URLs point at the main site (`www.gutenberg.org`), which the fetch path must never touch (see Design Decisions).
+1. The local mirror, else `GET https://gutenberg.pglaf.org/cache/epub/{id}/pg{id}.rdf` — the book's catalog record, which resolves which format (`text/plain; charset=utf-8` or `text/html`) the book has, from the formats map
+2. `GET https://gutenberg.pglaf.org/cache/epub/{id}/pg{id}.txt` (or `pg{id}-images.html` for the HTML fallback) — fetch the full file from the configured Project Gutenberg content mirror; a file above 8 MiB reads as four parallel byte ranges (see Full-Text Handling). The URL is built directly from the book ID, never from the catalog record's raw format URL — the formats map's URLs point at the main site (`www.gutenberg.org`), which the fetch path must never touch (see Design Decisions).
 
 **This is the core design challenge.** Full notes in the Design Decisions section below.
 
@@ -329,6 +343,14 @@ tool('gutenberg_get_text', {
       thrownBy: 'service',
     },
     {
+      reason: 'text_too_large',
+      code: JsonRpcErrorCode.InvalidRequest,
+      when: 'The text file is larger than this server can download within one call (over 40 MiB).',
+      recovery: "This book's text file is too large for this server to download within one call; repeating the call will not help. Search gutenberg_search_books for another edition of the work.",
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
       reason: 'invalid_text_response',
       code: JsonRpcErrorCode.SerializationError,
       when: 'The mirror returned an empty document, HTML on a plain-text path, or recognizable server failure document.',
@@ -368,7 +390,7 @@ tool('gutenberg_get_text', {
     {
       reason: 'text_fetch_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The Gutenberg mirror had a transient failure or the download did not finish within the remaining upstream allowance.',
+      when: 'The Gutenberg mirror had a transient failure, answered a byte-range read inconsistently, or the download did not finish within the remaining upstream allowance.',
       recovery: 'Project Gutenberg file servers are sometimes slow. Retry after a short delay. If the error persists, the file may be temporarily unavailable.',
       retryable: true,
       thrownBy: 'service',
@@ -376,9 +398,16 @@ tool('gutenberg_get_text', {
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The catalog lookup that precedes reading a book did not answer within the time this server allows.',
-      recovery: 'This failed before any text was requested — the catalog, not the file server, is unreachable. Retry later, or call gutenberg_get_book to confirm the catalog is answering again.',
+      when: 'The catalog record lookup that precedes reading a book did not answer, or returned an unreadable record, within the time this server allows.',
+      recovery: "This failed before any text was requested: the content mirror did not supply the book's catalog record. Retry later; the same mirror serves the text, so reading cannot succeed until it answers again.",
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_rejected',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The catalog record lookup that precedes reading a book was refused outright rather than failing temporarily.',
+      recovery: "Repeating the request will not help: the content mirror refused the book's catalog record before any text was requested. Ask the server operator to check the configured content mirror.",
       thrownBy: 'service',
     },
   ],
@@ -437,6 +466,11 @@ tool('gutenberg_browse_popular', {
     when: 'The catalog did not respond within its budget.',
     recovery: 'Retry later; changing filters does not resolve an upstream outage.',
     retryable: true, thrownBy: 'service',
+  }, {
+    reason: 'catalog_rejected', code: JsonRpcErrorCode.Forbidden,
+    when: 'The live Project Gutenberg catalog refused the browse outright rather than failing temporarily.',
+    recovery: 'Repeating the browse will not help, and another filter is refused the same way. Ask the server operator to check the configured catalog address or initialize the local catalog mirror.',
+    thrownBy: 'service',
   }],
 })
 ```
@@ -456,18 +490,29 @@ This section specifies `gutenberg_get_text`'s text-processing pipeline. It is th
                                 fall back to "text/html"; us-ascii-only books have no
                                 compliant mirror path and go straight to no_text_format
 2. Fetch file                  — URL is built from the book ID against the configured PG
-                                mirror (default gutenberg.pglaf.org), never from Gutendex's
-                                raw format URL: .../cache/epub/N/pgN.txt for utf-8,
+                                mirror (default gutenberg.pglaf.org), never from the catalog
+                                record's raw format URL: .../cache/epub/N/pgN.txt for utf-8,
                                 .../cache/epub/N/pgN-images.html for the html fallback;
-                                remaining shared 50s upstream allowance after catalog resolution
+                                remaining shared 50s upstream allowance after catalog resolution.
+                                The first GET is the ordinary request. A declared
+                                Content-Length over 40 MiB (41,943,040 bytes) fails at once as
+                                text_too_large. An uncompressed body over 8 MiB served with
+                                Accept-Ranges: bytes and a strong ETag is cancelled and re-read
+                                as 4 parallel byte ranges (Range, Accept-Encoding: identity,
+                                If-Range: <ETag>), each validated against the first response,
+                                assembled into one buffer, and decoded once; every other body
+                                (8 MiB or less, compressed, no ranges, no or weak ETag) reads
+                                on one connection, so HTML keeps its compressed transfer
 3. Decode as UTF-8             — the mirror serves generated UTF-8 bytes for both formats;
                                 reject recognized invalid documents, not content headers alone
 4. Strip BOM                  — remove a leading decoded UTF-8 BOM if present
 5. HTML→text if needed        — tokenize once, decode character references once, exclude
                                 metadata/template content, preserve block and table boundaries
                                 (whitespace-only text between table, row, and cell tags is
-                                dropped so a row stays on one line), then empty every line
-                                holding no visible character; plain-text editions skip this
+                                dropped so a row stays on one line; <br> is one newline and
+                                the ASCII whitespace after it is dropped outside <pre>), then
+                                empty every line holding no visible character; plain-text
+                                editions skip this
 6. Normalize whitespace       — normalize CRLF→LF and collapse 3+ consecutive newlines to 2
 7. Extract literary content   — extract between complete START/END marker lines when present;
                                 otherwise retain the processed text; reject empty documents
@@ -499,23 +544,24 @@ Rather than cutting at exactly `offset + limit` characters, find the last `\n\n`
 
 ### Caching
 
-Cache the extracted (stripped, normalized) text through tenant-scoped storage at `gutenberg/text/v3/{id}`, with a 24-hour TTL. Chunking and passage search run after cache lookup. The version segment moves whenever the pipeline changes stored text, so offsets from an older key version do not carry over. Fetching and processing still buffer the whole book in memory; there is no document-size cap or synchronous parsing deadline.
+Cache the extracted (stripped, normalized) text through tenant-scoped storage at `gutenberg/text/v4/{id}`, with a 24-hour TTL. Chunking and passage search run after cache lookup. The version segment moves whenever the pipeline changes stored text, so offsets from an older key version do not carry over. Fetching and processing buffer the whole book in memory; the one size bound is the 40 MiB download ceiling, and there is no synchronous parsing deadline.
 
 Catalog page, single-book and text cache writes are awaited best effort: a rejected write returns fetched data and logs `Cache write failed` with only the safe cache key. Caller cancellation preserves the original rejection. Cache reads and eviction retain their existing behavior. Text response titles and provenance come from current normalized catalog metadata even when a text cache entry retains an older title; the text cache key and offsets do not change.
 
 ### HTML fallback
 
 A small minority of books lack a `text/plain; charset=utf-8` format and only have `text/html`. In this case:
-- Fetch the mirror's `/cache/epub/N/pgN-images.html` (ID-derived, like the plain-text path — never Gutendex's raw `text/html` format URL, which points at the main site)
+- Fetch the mirror's `/cache/epub/N/pgN-images.html` (ID-derived, like the plain-text path — never the catalog record's raw `text/html` format URL, which points at the main site)
 - Tokenize once with parse5-sax-parser, excluding title, script, style, and nested template content without building a document tree
 - Decode character references once during parsing; retain Unicode and literal escaped references
+- A `<br>` emits one newline, matching the plain-text editions' one newline per line with a blank line between stanzas and other blocks. Outside `<pre>`, the ASCII whitespace after it up to the next visible text (the source line break and indentation, which a browser drops at a line start) emits nothing; `&nbsp;` indentation stays, and other source whitespace stays as it is, so hard-wrapped prose and cells keep their lines. Inside `<pre>`, `a<br>\nb` reads `a\n\nb`
 - Preserve block breaks, table cell separators, and distinct rows, including optional closing tags. Whitespace-only text outside an open cell (between table, row, and cell tags) is source layout and is dropped, so it cannot break a row across lines; a nested table's cells never end the cell that holds it, and a row or the table closes a cell the tokenizer saw no end tag for
 - Empty every line that holds no visible character: indentation nodes, `&nbsp;` spacers, and empty cells leave such lines. Plain-text editions keep theirs, since they are the source's own
 - Apply the same `*** START ***/*** END ***` extraction if markers are present in the HTML source; otherwise strip all markup and return the full document body
 
 The HTML fallback is less clean than plain text — formatting artifacts from markup are possible. Surface this via `sourceFormat: 'text/html'` in the response so callers know.
 
-Validate media type and document shape before caching. Plain-text paths reject HTML documents; HTML paths reject narrowly recognized whole-document server templates, never error keywords inside prose or missing Gutenberg markers. Permanent mirror failures use `text_file_not_found` or `text_fetch_rejected`; invalid documents use `invalid_text_response`; transient failures retain `text_fetch_failed`. Cache keys include the processing version so prior cached extraction cannot bypass validation.
+Validate media type and document shape before caching. Plain-text paths reject HTML documents; HTML paths reject narrowly recognized whole-document server templates, never error keywords inside prose or missing Gutenberg markers. Permanent mirror failures use `text_file_not_found` (404) or `text_fetch_rejected` (HTTP 501 and any other 4xx but 408 and 429); a file over the 40 MiB ceiling uses `text_too_large`; invalid documents use `invalid_text_response`; transient failures, and a byte range answered inconsistently with the first response, use `text_fetch_failed`. Cache keys include the processing version so prior cached extraction cannot bypass validation.
 
 ---
 
@@ -525,8 +571,8 @@ Validate media type and document shape before caching. Plain-text paths reject H
 
 | # | Call | Purpose | Notes |
 |:--|:-----|:--------|:------|
-| 1 | Ready local mirror, else `GET gutendex.com/books/{id}/` | Resolve formats + verify media_type | Cached; throws `audio_book` or `no_text_format` early; live attempts consume the remaining 15s ladder budget |
-| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path) | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB; attempts and retries consume the remainder of the shared 50s upstream allowance |
+| 1 | Ready local mirror, else `GET <content mirror>/cache/epub/{id}/pg{id}.rdf` | Resolve formats + verify media_type | Cached; throws `audio_book` or `no_text_format` early; a fetch consumes the remaining 15s ladder budget |
+| 2 | `GET <text URL>` (rewritten to HTTPS /cache/ path); above 8 MiB, 4 parallel byte ranges | Fetch full file (no redirect required after URL rewrite) | Cached; ~500KB–3MB for most books, up to 40 MiB (*Webster's Unabridged Dictionary*, 28,956,350 bytes, reads in about 25–27 s); attempts, ranges, and retries consume the remainder of the shared 50s upstream allowance |
 | — | In-process pipeline | BOM strip, HTML parsing when needed, marker extraction, normalize, chunk | CPU-only; depends on file size and format |
 
 Two upstream calls total for a cache miss, one (or zero) for a cache hit. One absolute 50s upstream allowance starts before catalog resolution; catalog network work gets at most 15s and text attempts consume the remainder. Storage and synchronous extraction are not hard bounded by that allowance. Metadata must precede text format selection. Actual expiry says the download did not finish in time; exhausted transient retries say the mirror remained temporarily unavailable.
@@ -562,13 +608,13 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **24-hour text cache TTL, 1-hour catalog TTL** | Text files are effectively immutable (updated at most a few times a year). Catalog metadata changes more often (download counts, new additions). Different TTLs reflect actual update frequency. |
 | **No `author_year_start/end` in `browse_popular`** | `browse_popular` is a discovery shortcut, not a research tool. Year-range filtering on a popularity browse is a niche compound query that belongs in `search_books` where the fuller filter set is available. |
 | **Separate `is_readable` and `has_plain_text`** | `is_readable` requires Text with UTF-8 plain text, or HTML without any audio format key; this excludes metadata and audio-index records from reading recommendations. It does not guarantee the generated mirror file exists. `has_plain_text` keeps Text + UTF-8 meaning. Both are computed at hydration without harvesting. The reader still attempts supported formats on non-Sound records regardless of the flag. |
-| **Nullable source notes in the mirror** | Direct RDF book descriptions preserve explicit edition references without another fetch. An additive nullable column keeps existing rows readable with `null`; the next normal harvest distinguishes populated notes from inspected-empty `[]`. |
+| **Nullable source notes in the mirror** | Direct RDF book descriptions preserve explicit edition references without another fetch. An additive nullable column keeps existing rows readable with `null`; the next normal harvest distinguishes populated notes from inspected-empty `[]`. A record read from the per-book RDF carries `[]` or its notes; `null` remains only on mirror rows not yet re-harvested. |
 | **Positive requested limits with local output caps** | Text stays bounded at 50,000 characters and browse at 32 books without adding upstream work. Requested/applied limits are explicit; actual remaining text or catalog matches determine truncation. |
 | **`ids` as comma-separated query string value** | The Gutendex API accepts ids as a single comma-separated value (`ids=84,1342`), not as repeated URL parameters (`ids=84&ids=1342` only returns the last value). Other filters still apply when ids is set — a conflicting language filter reduces results. The Zod input is `z.array(z.number())` and the service layer joins with commas. |
-| **Fetch URLs are ID-derived, never taken from Gutendex** | Gutendex's format URLs point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
+| **Fetch URLs are ID-derived, never taken from the catalog record** | The catalog's format URLs (Gutendex's and the RDF's) point at the main site (`www.gutenberg.org/ebooks/N...`), which is off-limits to automated fetches (see the mirror-preference row above). The server instead builds the mirror cache path directly from the book ID (`/cache/epub/N/pgN.txt`, `/cache/epub/N/pgN-images.html`) — this also sidesteps the HTTPS→HTTP redirect that Gutendex's own `/ebooks/N.txt.utf-8` URL issues, which modern Node.js runtimes won't follow. |
 | **MIME-prefix discovery filter** | Format-key prefixes select a corpus before counts and pagination; readability flags still describe each returned edition's reader support. |
 | **Tri-state copyright discovery filter** | Corpus selection preserves copyrighted, public-domain-in-USA and unknown source classifications independently, without implying worldwide legal clearance. |
-| **`summary` as nullable, with the full `summaries` array alongside** | Source-provided summaries are sorted on the RDF mirror and retain upstream order on live fallback. `summary` is the first entry, not necessarily primary, or null when absent. `summaries` preserves the complete set; `content[]` lists entries beyond `summary` without repeating it. |
+| **`summary` as nullable, with the full `summaries` array alongside** | Source-provided summaries are sorted when read from RDF and keep upstream order on a live Gutendex search row. `summary` is the first entry, not necessarily primary, or null when absent. `summaries` preserves the complete set; `content[]` lists entries beyond `summary` without repeating it. |
 | **`content[]` states absent fields rather than omitting them** | `structuredContent` carries `[]` and `null` verbatim, so a formatter that drops the line leaves a `content[]`-only client unable to distinguish a known-empty field from one the server never reported. Every collection and nullable in `gutenberg_get_book`, and the per-book subject list in `gutenberg_search_books`, therefore render unconditionally. Sentinel-based `format-parity` linting exercises one populated value per leaf and cannot catch value-dependent omission, so the empty states are covered by tests instead. |
 | **Refuse audio books explicitly** | Audio books have `media_type: "Sound"` and no literary text. Returning a readme file or an error without a clear message would confuse agents. The `audio_book` error contract gives a specific reason and recovery path. |
 | **Passage search is `find` on `gutenberg_get_text`, not a separate tool** | The scan runs over text the server already stores, adds no index, and a separate tool would repeat the fetch path. Callers jump to a quote or heading in one call instead of paging a novel in ~15. |
@@ -579,8 +625,11 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **`languages` takes 2–3 letter catalog codes, with no off switch on the raised cap** | The catalog holds three-letter codes (`ang`, `enm`) the old two-character cap rejected. The raised cap only accepts input that was previously rejected and changes no existing call's result, so an off switch would add a mode with nothing to protect; exact matching stays, and a three-letter miss such as `eng` gets a notice that codes match exactly. |
 | **One 50s upstream allowance for a reading call, composed with `ctx.signal`** | The absolute allowance starts before metadata resolution, caps catalog network work at 15s, and gives text attempts and retries the remainder. Slow successful bodies can finish without a 30s attempt restart. Storage and synchronous extraction are not hard bounded; cancellation is preserved. |
 | **Standalone catalog calls retain a full 15s network budget** | Mirror and cache waits do not consume that budget unless the reader supplies its absolute deadline. Fast transient failures retry within the remaining allowance. Actual deadline expiry and exhausted transient retries retain distinct messages. |
-| **Upstream outages are declared contract reasons, not bubbled fetch errors** | `catalog_unavailable` (all four tools) and `text_fetch_failed` (`gutenberg_get_text`) carry a recovery hint to both `structuredContent.error.data` and the mirrored `content[]` text. Their messages name the catalog or the book rather than the resolved request URL, which embeds an operator-configured, overridable base URL. The original error stays on `cause` for server-side logs. A caller cancel is never relabelled — it is not an upstream outage, and advertising a retry for it would be wrong. |
+| **Upstream outages are declared contract reasons, not bubbled fetch errors** | `catalog_unavailable` (all four tools) and `text_fetch_failed` (`gutenberg_get_text`) carry a recovery hint to both `structuredContent.error.data` and the mirrored `content[]` text. A catalog refusal that repeating cannot fix (any 4xx but 408 and 429, and 501) is the separate, non-retryable `catalog_rejected`, so a caller does not retry it as an outage; a 2xx body that does not parse stays `catalog_unavailable`. Their messages name the catalog or the book rather than the resolved request URL, which embeds an operator-configured, overridable base URL. The original error stays on `cause` for server-side logs. A caller cancel is never relabelled — it is not an upstream outage, and advertising a retry for it would be wrong. |
 | **`GUTENDEX_BASE_URL` and `GUTENBERG_TEXT_BASE_URL` override env vars** | Gutendex is open-source and self-hostable; the project explicitly encourages it. Some deployers may also run Gutenberg mirrors. Overrides cost nothing to implement and unlock private/enterprise deployments. |
+| **Per-user default mirror path and a compiled `mirror` subcommand** | A launch-directory-relative `./.mirror` is found only when the server starts from the checkout that built it, so a plugin or bundle install, launched from any directory, never read the mirror an `npx` run built. The default is `$XDG_DATA_HOME/gutenberg-mcp-server/gutenberg-catalog.sqlite`, the same file from every launch directory; the Docker image pins `GUTENBERG_MIRROR_PATH` to its `.mirror` volume. Node cannot run the shipped `.ts` scripts from `node_modules`, so the lifecycle commands compile into `dist/` as `gutenberg-mcp-server mirror` with an `init`, `refresh`, or `verify` action, dispatched from the entry before the server starts, and run under Node or Bun. An existing `./.mirror` database is read only when `GUTENBERG_MIRROR_PATH` points at it. |
+| **Single-book lookups read the per-book RDF, and its 404 is authoritative** | Gutendex's per-book detail endpoint lags the catalog and fails independently of the content mirror: for books posted since the last harvest, and for IDs that do not exist, it stalls until the catalog budget runs out. The per-book RDF is Project Gutenberg's own record on the host the text comes from, so a 200 is the record and a 404 is `not_found`, with no Gutendex request. The cost: when the content mirror is down, a `gutenberg_get_book` the local mirror cannot answer fails, where Gutendex might have answered; `gutenberg_get_text` could not read that book then either, since the same host serves the text. |
+| **Large texts read as parallel byte ranges after an ordinary first GET** | gutenberg.pglaf.org caps each connection at about 0.3–0.4 MB/s, so one connection carries only 15–20 MB inside the 50-second allowance, while four parallel ranges each keep nearly the single-connection rate. The first GET stays so HTML keeps its compressed transfer and a small book costs no extra request; only an uncompressed body over 8 MiB with `Accept-Ranges: bytes` and a strong ETag is cancelled and re-read as four ranges. The ranges decode once after assembly, so a UTF-8 character split at a boundary survives, and a range that does not continue the first response exactly fails the read rather than assemble mixed bytes. All ranges and retries share the one allowance and the caller's cancel. |
 
 ---
 
@@ -593,6 +642,6 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **No chapter-aware chunking** | Chapter boundaries in Gutenberg plain-text files are not consistently marked across the catalog (headings vary — "Chapter I", "CHAPTER 1", "Part First", etc.). The design uses paragraph-boundary chunking, which is reliable and consistent. True chapter detection would require per-book parsing heuristics and is deferred; `find` with the heading text jumps to a chapter start without it. |
 | **HTML fallback quality** | Books fetched via the HTML fallback may include formatting artifacts from markup conversion. The `sourceFormat` field signals this so agents can note the limitation. |
 | **Gutendex page size capped at 32** | The Gutendex API returns at most 32 results per page with no `page_size` parameter. Agents needing more results must call `gutenberg_search_books` multiple times with incrementing `page` values. |
-| **Very large books** | War and Peace is ~3MB of stripped text, over 150 20,000-character chunks. The in-process cache holds this fine, but complete ingestion by an agent would require many sequential calls. This is a corpus property, not a server limitation — the chunking design exists specifically to handle it. |
-| **Gutenberg mirror latency** | The configured content mirror can be slow. A shared 50s upstream allowance permits slow successful downloads, and the 24-hour text cache avoids repeated fetches. Eligible formats do not guarantee file existence; missing files retain `text_file_not_found`. |
-| **Gutendex API availability** | Gutendex is a community-run service, and cold queries routinely stall past its own gateway boundary. A ladder that exhausts its budget surfaces `catalog_unavailable` with a retry hint; the `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |
+| **Very large books** | War and Peace is ~3MB of stripped text, over 150 20,000-character chunks. The in-process cache holds this fine, but complete ingestion by an agent would require many sequential calls. This is a corpus property, not a server limitation — the chunking design exists specifically to handle it. The largest files are a download limit: a file over 8 MiB reads as four parallel ranges (*Webster's Unabridged Dictionary*, 28,956,350 bytes, in about 25–27 s), and one over 40 MiB fails with `text_too_large`. |
+| **Gutenberg mirror latency** | The configured content mirror can be slow, and gutenberg.pglaf.org caps each connection at about 0.3–0.4 MB/s. The same host serves book text, the bulk catalog archive, and per-book catalog records, so while it is down a `gutenberg_get_book` the local mirror cannot answer fails along with reading. A shared 50s upstream allowance permits slow successful downloads, and the 24-hour text cache avoids repeated fetches. Eligible formats do not guarantee file existence; missing files retain `text_file_not_found`. |
+| **Gutendex API availability** | Gutendex is a community-run service, and cold queries routinely stall past its own gateway boundary. It answers search and popularity browse only when the local mirror cannot. A ladder that exhausts its budget surfaces `catalog_unavailable` with a retry hint, and a refusal surfaces `catalog_rejected`; the `GUTENDEX_BASE_URL` override exists to allow fallback to a private Gutendex instance if the public one is unavailable. |

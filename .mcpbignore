@@ -9,15 +9,7 @@
 /.agents/
 /framework-skills/
 /src/
-# The catalog-mirror lifecycle scripts ship with the bundle (with
-# tsconfig.runtime.json below), so `mirror:*` runs from an installed bundle.
-# `/scripts/*`, not `/scripts/`: a negation cannot re-include a file whose
-# parent directory is excluded.
-/scripts/*
-!/scripts/_mirror-context.ts
-!/scripts/catalog-mirror-init.ts
-!/scripts/catalog-mirror-refresh.ts
-!/scripts/catalog-mirror-verify.ts
+/scripts/
 /tests/
 /docs/
 /changelog/
@@ -43,5 +35,4 @@
 /wrangler.toml
 /biome.json
 /tsconfig*.json
-!/tsconfig.runtime.json
 /vitest.config.ts

@@ -5,8 +5,8 @@
 # source code into JavaScript, and prepares the production assets.
 #
 # Pinned to $BUILDPLATFORM rather than the target platform: `bun run build` emits
-# JavaScript, and only `dist/` and the mirror lifecycle scripts cross into the
-# production stage. Built for the target instead, the non-native leg of a
+# JavaScript, and only `dist/` and `skills/` cross into the production stage.
+# Built for the target instead, the non-native leg of a
 # `--platform linux/amd64,linux/arm64` build runs under QEMU, where bun >= 1.4
 # aborts with a JavaScriptCore allocator assertion and fails the multi-arch push.
 #
@@ -144,21 +144,11 @@ LABEL org.opencontainers.image.source="https://github.com/cyanheads/gutenberg-mc
 COPY package.json ./
 COPY --from=deps /usr/src/app/node_modules ./node_modules
 
-# Copy the compiled application code from the build stage
+# Copy the compiled application code from the build stage. It carries the
+# catalog-mirror lifecycle commands: `docker exec … bun run mirror:init` runs
+# `bun ./dist/index.js mirror init`.
 COPY --from=build /usr/src/app/dist ./dist
 COPY --from=build /usr/src/app/skills ./skills
-
-# Copy the catalog-mirror lifecycle scripts so `docker exec … bun run mirror:init`
-# works in a running container. The shared context shim is imported by all three.
-COPY --from=build /usr/src/app/scripts/catalog-mirror-init.ts \
-                  /usr/src/app/scripts/catalog-mirror-refresh.ts \
-                  /usr/src/app/scripts/catalog-mirror-verify.ts \
-                  /usr/src/app/scripts/_mirror-context.ts \
-                  ./scripts/
-
-# Lifecycle commands explicitly select the runtime aliases, resolving source in a
-# checkout and compiled modules in npm packages and this image.
-COPY tsconfig.runtime.json ./
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
@@ -170,6 +160,11 @@ RUN mkdir -p /var/log/gutenberg-mcp-server && chown -R bun:bun /var/log/gutenber
 # mirror), owned by the runtime user. Mount a volume over either in production.
 RUN mkdir -p /usr/src/app/.cache /usr/src/app/.mirror \
   && chown -R bun:bun /usr/src/app/.cache /usr/src/app/.mirror
+
+# Pin the catalog mirror to the `.mirror` volume. The default is per-user
+# ($XDG_DATA_HOME, else ~/.local/share), which here is the image user's home,
+# off the volume: the server would read a cold mirror.
+ENV GUTENBERG_MIRROR_PATH=/usr/src/app/.mirror/gutenberg-catalog.sqlite
 
 # Switch to the non-root user
 USER bun

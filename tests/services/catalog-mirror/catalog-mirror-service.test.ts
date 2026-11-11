@@ -10,9 +10,15 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { requestContextService, schedulerService } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
-import { CatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
+import {
+  CatalogMirrorService,
+  initCatalogMirrorService,
+  startCatalogMirrorRefresh,
+  stopCatalogMirrorRefresh,
+} from '@/services/catalog-mirror/catalog-mirror-service.js';
 import { parseBookRdf } from '@/services/catalog-mirror/rdf-book-parser.js';
 import { type ArchiveServer, startArchiveServer } from './archive-server.js';
 
@@ -96,15 +102,15 @@ describe('CatalogMirrorService — harvest', () => {
     await expect(service.getBooks([])).resolves.toEqual([]);
   });
 
-  it('does not use the store getByIds, which drops every row on an INTEGER key', async () => {
+  it('reads the INTEGER key through the store getByIds, a repeated ID at each position', async () => {
     /**
-     * Characterization of the framework store, pinning why `getBooks` filters instead:
-     * `getByIds` takes string keys, and SQLite's numeric affinity makes the SQL match —
-     * but the result is re-keyed by the raw column value, so a numeric `id` never finds
-     * its string key and every row is discarded.
+     * Characterization of the framework store `getBooks` reads through: a string ID
+     * matches the `INTEGER` key as `id = ?` does, in the requested order.
      */
-    await expect(service.mirror.store.getByIds(['84'])).resolves.toEqual([]);
-    await expect(service.getBooks([84])).resolves.toHaveLength(1);
+    const rows = await service.mirror.store.getByIds(['84']);
+    expect(rows.map((row) => row.id)).toEqual([84]);
+    const books = await service.getBooks([84, 1399, 84]);
+    expect(books.map((book) => book.id)).toEqual([84, 1399, 84]);
   });
 });
 
@@ -320,5 +326,74 @@ describe('CatalogMirrorService — resume', () => {
 
     expect(resumed.recordsApplied).toBe(SAMPLE_IDS.length);
     expect((await service.verify()).rows).toBe(SAMPLE_IDS.length);
+  });
+});
+
+describe('CatalogMirrorService — refresh cron', () => {
+  afterEach(async () => {
+    await stopCatalogMirrorRefresh();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Build the shared service's mirror and register the cron with the real scheduler,
+   * returning the registered task to fire as a tick. The scheduler's own wrapper logs a
+   * throwing task instead of rethrowing it, so the test calls the task directly.
+   */
+  async function startCron(): Promise<() => Promise<void>> {
+    const config: ServerConfig = {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: mirror.baseUrl,
+      mirrorPath: join(workDir, 'catalog.sqlite'),
+      mirrorRefreshCron: '0 4 * * *',
+    };
+    await service.close();
+    service = initCatalogMirrorService(config);
+    await service.runSync({ mode: 'init' });
+    const schedule = vi.spyOn(schedulerService, 'schedule');
+    await startCatalogMirrorRefresh(config);
+    const task = schedule.mock.calls[0]?.[2];
+    if (!task) throw new Error('The refresh cron registered no task.');
+    return async () => {
+      await task(requestContextService.createRequestContext({ operation: 'test:cron-tick' }));
+    };
+  }
+
+  it('stops an in-flight refresh and waits for it to record its state', async () => {
+    const tick = await startCron();
+    mirror.serve('catalog-sample-updated.tar.bz2', SECOND_BUILD);
+    mirror.throttle(true);
+    const downloading = mirror.nextGet();
+    const ticked = tick();
+    await downloading;
+
+    await stopCatalogMirrorRefresh();
+
+    expect(schedulerService.listJobs().map((job) => job.id)).toEqual([]);
+    const report = await service.verify();
+    expect(report.status.status).toBe('error');
+    expect(report.status.ready).toBe(true);
+    expect(report.status.checkpoint).toBe(FIRST_BUILD.toISOString());
+    expect(report.rows).toBe(SAMPLE_IDS.length);
+    await expect(ticked).resolves.toBeUndefined();
+  });
+
+  it('skips a tick while another sync of the same store holds the lock', async () => {
+    const tick = await startCron();
+    mirror.serve('catalog-sample-updated.tar.bz2', SECOND_BUILD);
+    mirror.throttle(true);
+    /** A `mirror refresh` run in another process, holding the store's sync lock. */
+    const other = makeService();
+    const stopOther = new AbortController();
+    const downloading = mirror.nextGet();
+    const holding = other.runSync({ mode: 'refresh', signal: stopOther.signal });
+    try {
+      await downloading;
+      await expect(tick()).resolves.toBeUndefined();
+    } finally {
+      stopOther.abort();
+      await expect(holding).rejects.toThrow();
+      await other.close();
+    }
   });
 });

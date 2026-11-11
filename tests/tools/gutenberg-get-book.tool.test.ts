@@ -3,11 +3,19 @@
  * @module tests/tools/gutenberg-get-book.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { Context } from '@cyanheads/mcp-ts-core';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createInMemoryStorage,
+  createMockContext,
+  type FetchMockHarness,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import fc from 'fast-check';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 import {
   ACTIVE_MARKDOWN,
@@ -746,5 +754,149 @@ describe('gutenbergGetBook — catalog_unavailable', () => {
     });
     expect(text).toContain('Recovery:');
     expect(text).not.toContain('gutendex.com');
+  });
+});
+
+// ── Per-book RDF lookup through the real service (#58, #59) ──────────────────
+//
+// The classifier is tabled at its own seam in the service suite; these prove the
+// tool's wiring end to end, one case per outcome, with the real service behind a
+// fetch fake. No catalog mirror is initialized here, so every lookup is a miss.
+
+const MIRROR_HOST = 'https://mirror.test';
+const rdfUrl = (id: number) => `${MIRROR_HOST}/cache/epub/${id}/pg${id}.rdf`;
+const readRdf = (id: number) =>
+  readFileSync(new URL(`../fixtures/catalog-mirror/rdf/pg${id}.rdf`, import.meta.url), 'utf8');
+
+/** The recovery this tool declares for a reason. */
+function declared(reason: string): string | undefined {
+  return (gutenbergGetBook.errors as readonly { reason: string; recovery: string }[]).find(
+    (entry) => entry.reason === reason,
+  )?.recovery;
+}
+
+/** Text a client reads from a result's `content[]`. */
+function clientText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return readBack(contentText(result)).text;
+}
+
+describe('gutenbergGetBook — per-book RDF lookup', () => {
+  let http: FetchMockHarness;
+
+  beforeEach(async () => {
+    const { GutendexService } = await vi.importActual<
+      typeof import('@/services/gutendex/gutendex-service.js')
+    >('@/services/gutendex/gutendex-service.js');
+    const service = new GutendexService({} as AppConfig, createInMemoryStorage(), {
+      gutendexBaseUrl: 'https://catalog.test/books/',
+      gutenbergTextBaseUrl: MIRROR_HOST,
+      mirrorPath: ':memory:',
+    });
+    mockGutendexService.getBook.mockImplementation((id: number, ctx: Context) =>
+      service.getBook(id, ctx),
+    );
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    mockGutendexService.getBook.mockReset();
+    vi.useRealTimers();
+  });
+
+  it('returns a book the mirror lacks from its RDF record, source notes included', async () => {
+    /** The published record carries no note, so the case adds one to the copy it serves. */
+    const note = 'A bibliographic note on this edition.';
+    const rdf = readRdf(79964).replace(
+      '</pgterms:ebook>',
+      `<dcterms:description>${note}</dcterms:description></pgterms:ebook>`,
+    );
+    http.route({ match: rdfUrl(79964), respond: () => new Response(rdf) });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 79964 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      id: 79964,
+      title: 'Mothers still',
+      source_notes: [note],
+      is_readable: true,
+    });
+    expect(clientText(result)).toContain(note);
+    expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(79964)]);
+  });
+
+  it('fails an ID with no RDF record as not_found after one request', async () => {
+    http.route({
+      match: rdfUrl(99999999),
+      respond: () => new Response('<html>404 Not Found</html>', { status: 404 }),
+    });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 99999999 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        message: 'No book found with Gutenberg ID 99999999.',
+        data: { reason: 'not_found', recovery: { hint: declared('not_found') } },
+      },
+    });
+    expect(clientText(result)).toContain(`Recovery: ${declared('not_found')}`);
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('fails a refused lookup as catalog_rejected after one request, naming no host on either surface', async () => {
+    http.route({
+      match: rdfUrl(99999999),
+      respond: () => new Response('<html>403 Forbidden</html>', { status: 403 }),
+    });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 99999999 });
+
+    expect(result.isError).toBe(true);
+    const hint = declared('catalog_rejected');
+    expect(hint).toEqual(expect.any(String));
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.Forbidden,
+        message: 'The Project Gutenberg catalog rejected the lookup for book 99999999.',
+        data: { reason: 'catalog_rejected', recovery: { hint } },
+      },
+    });
+    expect(clientText(result)).toBe(
+      `Error: The Project Gutenberg catalog rejected the lookup for book 99999999.\n\nRecovery: ${hint}\n\n(reason catalog_rejected)`,
+    );
+    for (const leak of ['mirror.test', '://', '403 Forbidden']) {
+      expect(JSON.stringify(result)).not.toContain(leak);
+    }
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('fails an unreadable record as catalog_unavailable with no parser text on either surface', async () => {
+    vi.useFakeTimers();
+    http.route({ match: rdfUrl(84), respond: () => new Response(readRdf(84).slice(0, 2971)) });
+
+    const pending = runToolContract(gutenbergGetBook, { id: 84 });
+    await vi.advanceTimersByTimeAsync(16_000);
+    const result = await pending;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'The Project Gutenberg catalog did not respond for book 84.',
+        data: {
+          reason: 'catalog_unavailable',
+          recovery: { hint: declared('catalog_unavailable') },
+        },
+      },
+    });
+    for (const leak of ['mirror.test', '://', 'readTagExp', 'dcterms']) {
+      expect(JSON.stringify(result)).not.toContain(leak);
+    }
+    expect(http.calls.length).toBeGreaterThan(0);
+    expect(http.calls.every((call) => call.request.url === rdfUrl(84))).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 # gutenberg-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 05:26:35
+Generated on: 2026-11-11 15:00:12
 
 ```text
 gutenberg-mcp-server/
@@ -121,12 +121,8 @@ gutenberg-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── scripts/
-│   ├── _mirror-context.ts
 │   ├── build-changelog.ts
 │   ├── build.ts
-│   ├── catalog-mirror-init.ts
-│   ├── catalog-mirror-refresh.ts
-│   ├── catalog-mirror-verify.ts
 │   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
@@ -164,6 +160,7 @@ gutenberg-mcp-server/
 │   │   ├── catalog-mirror/
 │   │   │   ├── catalog-mirror-service.ts
 │   │   │   ├── catalog-mirror-store.ts
+│   │   │   ├── mirror-cli.ts
 │   │   │   ├── rdf-archive-stream.ts
 │   │   │   └── rdf-book-parser.ts
 │   │   ├── gutenberg-text/
@@ -173,9 +170,12 @@ gutenberg-mcp-server/
 │   │   │   ├── gutendex-service.ts
 │   │   │   └── types.ts
 │   │   ├── best-effort-cache.ts
-│   │   └── upstream-deadline.ts
+│   │   ├── upstream-deadline.ts
+│   │   └── upstream-rejection.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── fixtures/
 │   │   └── catalog-mirror/
 │   │       ├── gutendex/
@@ -191,6 +191,7 @@ gutenberg-mcp-server/
 │   │       │   ├── pg1073.rdf
 │   │       │   ├── pg1399.rdf
 │   │       │   ├── pg45304.rdf
+│   │       │   ├── pg79964.rdf
 │   │       │   └── pg84.rdf
 │   │       ├── catalog-sample-updated.tar.bz2
 │   │       └── catalog-sample.tar.bz2
@@ -203,6 +204,7 @@ gutenberg-mcp-server/
 │   │   │   ├── archive-server.ts
 │   │   │   ├── catalog-mirror-service.test.ts
 │   │   │   ├── catalog-mirror-store.test.ts
+│   │   │   ├── mirror-cli.test.ts
 │   │   │   ├── rdf-archive-stream.test.ts
 │   │   │   └── rdf-book-parser.test.ts
 │   │   ├── gutenberg-text/
@@ -243,8 +245,6 @@ gutenberg-mcp-server/
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
-├── tsconfig.runtime.json
-├── tsconfig.scripts-check.json
 └── vitest.config.ts
 ```
 
