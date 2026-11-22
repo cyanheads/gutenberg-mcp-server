@@ -35,10 +35,10 @@ Project Gutenberg's library of 78,000+ public-domain books. Search by title, aut
 
 | Tool | Description |
 |:-----|:------------|
-| `gutenberg_search_books` | Search the catalog by title, author, topic, translator, language, or author lifespan, with pagination and popularity sorting |
-| `gutenberg_get_book` | Fetch complete metadata for a book by ID — authors, translators, editors, full formats map, subjects, copyright status |
+| `gutenberg_search_books` | Search editions by title, people, table of contents, classification, language, format, and copyright status |
+| `gutenberg_get_book` | Look up an edition’s credits, alternative titles, contents, classification, release date, imprint, reading-ease note, and formats |
 | `gutenberg_get_text` | Retrieve a book's plain-text content stripped of license boilerplate, with offset/limit chunking or a `find` jump to a passage |
-| `gutenberg_browse_popular` | Browse the most-downloaded books, optionally filtered by language or topic |
+| `gutenberg_browse_popular` | Rank editions by recent downloads with language, topic, format, media type, classification, or copyright filters |
 
 The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers deciding whether a book can be read, ruling out search blind spots before calling a book missing, finding openings and chapters past front matter, paging long texts, and ranking editions. Plugin installs include it; MCP clients can discover it through the Skills extension and its skill resource.
 
@@ -48,17 +48,21 @@ The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers 
 
 ### `gutenberg_search_books` <sub>tool</sub>
 
-- Filters: `query` (title/author words), `topic`, `translator`, `languages` (catalog codes exactly as results report them, two or three letters: `en`, not `eng`), `author_year_start`/`author_year_end`, `ids`, `mime_type`, and `copyright` (`"true"`, `"false"`, `"null"`; false means public domain in the USA). Live fallback rejects queries over four words and the `translator` filter
+- Use `query` for words in titles and author names. The local mirror also matches alternative titles. Use `author` for one creator’s name and aliases, `translator` or `contributor` for other credits, and `contents` for a phrase in a collection’s table of contents.
+- Combine with `topic`, `languages` (e.g. `en`), `author_year_start`, `author_year_end`, `ids`, `mime_type`, or `copyright` (`"false"` means public domain in the USA). `media_type` selects any listed catalog type, and `lcc` selects any listed Library of Congress Classification prefix.
 - With both author-year bounds, one author must meet both. The live fallback checks the bounds separately and says so in a notice
 - `sort` is `popular` (default) or `ascending`/`descending` by Gutenberg ID. Up to 32 books per page; use `totalCount` and `hasMore` to page
-- Each result carries `is_readable` (eligible Text formats; mirror file availability is not guaranteed) and `has_plain_text`. The local mirror ignores case and accents in query, translator and topic matching; live matching is upstream-defined. Result rows omit translators; `gutenberg_get_book` reports them. Fails with `translator_requires_mirror`, `query_requires_mirror`, `page_out_of_range`, `catalog_rejected`, or `catalog_unavailable`
+- The mirror ignores case and accents in title, name, subject, and contents matching. Gutendex uses its own matching rules.
+- Search and browse rows include `media_type`, `lcc`, `is_readable`, and `has_plain_text`. `catalogSource` identifies a local `mirror` or `live` Gutendex answer. `catalogAsOf` gives the last recorded archive timestamp when available. An empty ID selection consults neither catalog and omits both fields.
+- Author, contributor, contents, media-type, and LCC filters require the mirror (`filter_requires_mirror`). Gutendex fallback reports `translator_requires_mirror` for a translator filter and `query_requires_mirror` for more than four query words. Exhausted pages report `page_out_of_range`. Upstream failures report `catalog_rejected` or `catalog_unavailable`.
 
 ---
 
 ### `gutenberg_get_book` <sub>tool</sub>
 
-- Returns the full `formats` map (MIME type → download URL) and authors, translators, and editors with birth/death years
-- Also carries `is_readable`, `has_plain_text`, `summary`, `source_notes`, and `download_count` (downloads in the last 30 days, not lifetime)
+- Returns the full `formats` map, authors with aliases and cataloged English Wikipedia links, translators, editors, and role-tagged contributors.
+- Compare editions using `alternative_titles`, `contents`, `lcc`, `release_date`, `source_imprint`, and `reading_ease`. Detail identifies whether the local mirror or per-book RDF supplied the record. A null catalog field is unavailable. An inspected empty list is `[]`.
+- Also includes `is_readable`, `has_plain_text`, `summary`, `source_notes`, and the edition’s downloads in the last 30 days.
 - Reads the local mirror, then the book's own record on the content mirror. Fails with `not_found`, `catalog_rejected`, or `catalog_unavailable`
 
 ---
@@ -77,8 +81,8 @@ The published [gutenberg-guide](./skills/gutenberg-guide/SKILL.md) skill covers 
 ### `gutenberg_browse_popular` <sub>tool</sub>
 
 - Returns up to 32 titles (`limit`, default 20), most downloaded in the last 30 days first. `requestedLimit` and `appliedLimit` report the cap
-- Optional `languages`, `topic`, `mime_type`, and `copyright` filters work as in search. `totalInCatalog` gives the full count
-- Output reports truncation and carries a `continuation` pointing at `gutenberg_search_books`. Empty results succeed with a notice; fails with `catalog_rejected` or `catalog_unavailable`
+- Optional `languages`, `topic`, `mime_type`, `media_type`, `lcc`, and `copyright` filters work as in search. `totalInCatalog` gives the full count
+- Output reports truncation and carries a `continuation` pointing at `gutenberg_search_books`. Empty results succeed with a notice. Mirror-only filters can fail with `filter_requires_mirror`. Upstream failures use `catalog_rejected` or `catalog_unavailable`.
 
 ---
 

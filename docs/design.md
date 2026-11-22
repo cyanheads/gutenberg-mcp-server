@@ -6,14 +6,14 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `gutenberg_search_books` | Search the Project Gutenberg catalog by title/author, topic, translator, language, author lifespan, ID list, format, or copyright status | `query`, `topic`, `translator`, `languages`, `author_year_start`, `author_year_end`, `sort`, `ids`, `page`, `mime_type`, `copyright` | `readOnlyHint: true` |
+| `gutenberg_search_books` | Search the Project Gutenberg catalog by title, people, contents, classification, or a combination of discovery filters | `query`, `topic`, `author`, `translator`, `contributor`, `contents`, `lcc`, `media_type`, `languages`, `author_year_start`, `author_year_end`, `sort`, `ids`, `page`, `mime_type`, `copyright` | `readOnlyHint: true` |
 | `gutenberg_get_book` | Fetch full metadata for a single book by Gutenberg ID | `id` | `readOnlyHint: true`, `idempotentHint: true` |
 | `gutenberg_get_text` | Retrieve the plain-text content of a book, stripped of the license boilerplate, with offset/limit chunking, or a `find` jump to a passage | `id`, `offset`, `limit`, `find` | `readOnlyHint: true`, `idempotentHint: true` |
-| `gutenberg_browse_popular` | Return the most-downloaded books, optionally filtered by language, topic, format, or copyright status | `languages`, `topic`, `mime_type`, `copyright`, `limit` | `readOnlyHint: true` |
+| `gutenberg_browse_popular` | Return the most-downloaded books, optionally filtered by language, topic, format, or copyright status | `languages`, `topic`, `mime_type`, `copyright`, `lcc`, `media_type`, `limit` | `readOnlyHint: true` |
 
 ### Resources
 
-None. The tool surface is self-sufficient for tool-only agents. A `gutenberg://books/{id}` resource could expose metadata as injectable context, but since all clients have `gutenberg_get_book`, adding a resource would duplicate without adding capability.
+The server publishes its reading and discovery guide at `skill://gutenberg-guide/SKILL.md`. Book metadata is available through `gutenberg_get_book`.
 
 ### Prompts
 
@@ -97,7 +97,9 @@ Each step is independently testable. The text service can be unit-tested with a 
 
 **Source:** the ready local RDF mirror; cold/unreadable mirrors fall back to `GET https://gutendex.com/books/?search=...&topic=...&languages=...&sort=...&page=...&mime_type=...&copyright=...`. Parameterized SQLite predicates apply before both totals and page selection, with ID tie-breaks for popular ordering. Empty results remain local answers. A search with `ids` keeps this mirror-or-Gutendex path, with no per-ID RDF fan-out.
 
-Every nonblank whitespace-separated query word must occur in a title or author name as a literal substring. The mirror's catalog fold ignores case and accents (NFKD, combining-mark removal, then æ→ae, œ→oe, ø→o, ß→ss, ł→l, ð→d, þ→th). Query, translator and topic use this fold; words that fold empty are removed and entirely empty filters are unset. Passage `find` retains its separate accent-sensitive fold. Live matching is upstream-defined and rejects more than four words with `query_requires_mirror` before any request.
+Each mirror query word can occur in a primary title, alternative title, or creator name. The `author` filter instead requires all words to match a single creator’s name or aliases. The mirror's catalog fold ignores case and accents (NFKD, combining-mark removal, then æ→ae, œ→oe, ø→o, ß→ss, ł→l, ð→d, þ→th). Query, translator and topic use this fold; words that fold empty are removed and entirely empty filters are unset. Passage `find` retains its separate accent-sensitive fold. Live matching is upstream-defined and rejects more than four words with `query_requires_mirror` before any request.
+
+Schema v6 adds nullable catalog metadata. A migrated row keeps its data and checkpoint. New RDF fields fill when a harvest processes that row. Canonical author names and stored media types are immediately searchable.
 
 Schema v5 normalizes stored MARC subtitle/contributor/volume markers, preserving bibliographic separators and literal dollars, then rewrites all five folded columns without harvesting. Titles update with the FTS trigger active; folded-only updates suspend and restore that trigger. Null translator columns remain null. RDF ingestion and live normalization share the title normalizer. Discovery uses `instr` on folded values, preserving literal percent/underscore punctuation rather than FTS token semantics.
 
@@ -105,20 +107,25 @@ Schema v5 normalizes stored MARC subtitle/contributor/volume markers, preserving
 
 `author_year_start` and `author_year_end` match an author with a known birth or death year on or after the start and on or before the end. Alone, each bound reads the stored per-book extremes. Together, the mirror also requires one author to meet both bounds, so an author whose only known year falls outside the range is dropped even when another author of the book falls inside. Gutendex checks the bounds separately; when the live fallback answers a two-bound search, a notice says so.
 
-The service reports which source answered (mirror, live, or none for an empty `ids`) so the tools compose one notice; `source` is not part of the tool output. Empty advice names only normalized supplied filters, with MIME-prefix examples when relevant. A mirror-only language-presence lookup on empty three-letter-code results suppresses the English-code hint for known codes; a failed optional lookup preserves the answer and omits the unverified hint, without a live request. Live fallback retains the exact-code caveat. An empty live ASCII query adds an accent hint. Search reports IDs that matched nothing under these filters only on page 1 without more pages. Browse at the cap points to continuation; below the cap it may also suggest raising the limit.
+All three catalog tools expose `catalogSource` and `catalogAsOf` in structured results and the text trailer. `mirror` identifies a local catalog read and carries the last recorded bulk-archive checkpoint, or null if unavailable. `live` identifies Gutendex discovery and `rdf` a per-book RDF lookup, both with a null date. Only `ids: []` omits provenance. The archive checkpoint can lag individual rows during a refresh. Empty advice names only normalized supplied filters, with MIME-prefix examples when relevant. A mirror-only language-presence lookup on empty three-letter-code results suppresses the English-code hint for known codes; a failed optional lookup preserves the answer and omits the unverified hint, without a live request. Live fallback retains the exact-code caveat. An empty live ASCII query adds an accent hint. Search reports IDs that matched nothing under these filters only on page 1 without more pages. Browse at the cap points to continuation; below the cap it may also suggest raising the limit.
 
 Both discovery tools accept `mime_type` (literal format-key prefix; lowercase type/subtype before the first semicolon, leaving parameter suffix case intact) and `copyright` (`"true"`, `"false"`, `"null"`, OR). False is the source's public-domain-in-the-USA classification; null remains unknown. Blank optional strings and empty language/copyright lists are unset. An explicit `ids: []` selects nothing without catalog I/O. Language items retain their advertised length of 2–3 characters; overlong values explain that codes such as "en" or "fr" must be separate items. Both tools declare typed `effectiveCriteria` and `notice` enrichment for full text and structured output; empty first-page matches are successful empty collections, while exhausted pages retain `page_out_of_range`.
 
 ```ts
 tool('gutenberg_search_books', {
-  description: 'Search the Project Gutenberg catalog of 78,000+ public-domain books by title, author, topic, translator, language, author lifespan, or IDs. Popularity uses downloads in the last 30 days at the source snapshot. Use is_readable to select an edition for gutenberg_get_text.',
+  description: 'Search the Project Gutenberg catalog of 78,000+ public-domain books by title, author and contributor credits, table of contents, classification, media type, or other catalog criteria. Popularity uses downloads in the last 30 days at the source snapshot. Use is_readable to select an edition for gutenberg_get_text.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     mime_type: z.string().optional().describe('Literal format MIME prefix; blank means unset.'),
     copyright: z.array(z.enum(['true', 'false', 'null'])).optional().describe('Any selected copyright status: false means public domain in the USA, null means unknown; empty means all.'),
+    author: z.string().optional(),
+    contributor: z.string().optional(),
+    contents: z.string().optional(),
+    lcc: z.array(z.string()).optional(),
+    media_type: z.array(z.string()).optional(),
     query: z.string().optional()
-      .describe('Every nonblank query word matches a case-insensitive literal title/author substring. More than four words require the local mirror.'),
+      .describe('Every nonblank query word matches a literal substring in a primary title, alternative title, or author name on the mirror. More than four words require the local mirror.'),
     topic: z.string().optional()
       .describe('Phrase to match against subjects and bookshelves, ignoring case and, on the local mirror, accents. Example: "detective" matches the "Detective Fiction" bookshelf and "Detective and mystery stories" subject. Separate from query — topic searches categorization metadata, not title/author.'),
     translator: z.string().optional()
@@ -147,6 +154,8 @@ tool('gutenberg_search_books', {
         death_year: z.number().nullable().describe('Author death year, or null if unknown or still living.'),
       })).describe('Author(s) of the work. Translators and editors are excluded from this field — see gutenberg_get_book for full contributor lists.'),
       languages: z.array(z.string()).describe('Catalog language codes for this edition.'),
+      lcc: z.array(z.string()).nullable(),
+      media_type: z.string(),
       subjects: z.array(z.string()).describe('Library of Congress subject headings for the work.'),
       download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
       has_plain_text: z.boolean().describe('True for Text records with UTF-8 plain text; use is_readable for reader support.'),
@@ -160,6 +169,10 @@ tool('gutenberg_search_books', {
 
   errors: [
     {
+      reason: 'filter_requires_mirror', code: JsonRpcErrorCode.ValidationError,
+      when: 'A contributor, author, contents, media type, or LCC filter needs the unavailable mirror.',
+      recovery: 'Remove the named filter or initialize the local catalog mirror.', thrownBy: 'service',
+    }, {
       reason: 'translator_requires_mirror',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A translator filter was supplied while the local mirror could not answer.',
@@ -198,7 +211,7 @@ tool('gutenberg_search_books', {
 })
 ```
 
-**`format()` rendering:** IDs, titles, authors, languages, subjects, downloads in the last 30 days at the source snapshot, `has_plain_text`, and `is_readable`; total count, page, and continuation. Catalog text (titles, author names, languages, subjects) is Markdown-escaped. The criteria trailer carries the JSON in a code span.
+**`format()` rendering:** IDs, titles, authors, languages, subjects, media type, LCC codes, downloads in the last 30 days at the source snapshot, `has_plain_text`, and `is_readable`; total count, page, and continuation. Catalog text (titles, author names, languages, subjects) is Markdown-escaped. The criteria trailer carries the JSON in a code span.
 
 ---
 
@@ -206,7 +219,7 @@ tool('gutenberg_search_books', {
 
 **Purpose:** Fetch the complete metadata record for a single book by its Gutenberg ID, including the full formats map needed before fetching text.
 
-**Source:** the ready local RDF mirror; on a miss, `GET <GUTENBERG_TEXT_BASE_URL>/cache/epub/{id}/pg{id}.rdf`, the book's own record on the content mirror, parsed with the same `parseBookRdf` the mirror harvest uses. The RDF is authoritative for existence: a 404 is `not_found` with no Gutendex request. A 200 that does not parse to a whole book, including a record cut short before its closing `</rdf:RDF>`, is `catalog_unavailable`. The parsed record is cached for one hour at `gutenberg/book/v1/{id}`.
+**Source:** the ready local RDF mirror; on a miss, `GET <GUTENBERG_TEXT_BASE_URL>/cache/epub/{id}/pg{id}.rdf`, the book's own record on the content mirror, parsed with the same `parseBookRdf` the mirror harvest uses. The RDF is authoritative for existence: a 404 is `not_found` with no Gutendex request. A 200 that does not parse to a whole book, including a record cut short before its closing `</rdf:RDF>`, is `catalog_unavailable`. The parsed record is cached for one hour at `gutenberg/book/v2/{id}`.
 
 ```ts
 tool('gutenberg_get_book', {
@@ -225,6 +238,8 @@ tool('gutenberg_get_book', {
       name: z.string().describe('Author name in "Last, First" format.'),
       birth_year: z.number().nullable().describe('Birth year, or null if unknown.'),
       death_year: z.number().nullable().describe('Death year, or null if unknown or still living.'),
+      aliases: z.array(z.string()).nullable(),
+      webpage: z.string().nullable(),
     })).describe('Primary author(s).'),
     translators: z.array(z.object({
       name: z.string(),
@@ -242,6 +257,13 @@ tool('gutenberg_get_book', {
     copyright: z.boolean().nullable().describe('Copyright status: false = public domain in the USA, true = under copyright, null = unknown.'),
     media_type: z.string().describe('Source media type; use is_readable for reader support.'),
     download_count: z.number().describe('Downloads in the last 30 days at the source snapshot.'),
+    alternative_titles: z.array(z.string()).nullable(),
+    contributors: z.array(z.object({ name: z.string(), role: z.string(), birth_year: z.number().nullable(), death_year: z.number().nullable() })).nullable(),
+    contents: z.string().nullable(),
+    lcc: z.array(z.string()).nullable(),
+    release_date: z.string().nullable(),
+    reading_ease: z.string().nullable(),
+    source_imprint: z.string().nullable(),
     source_notes: z.array(z.string()).nullable().describe('Direct RDF bibliographic notes, in order. [] means inspected empty; null means unavailable.'),
     is_readable: z.boolean().describe('Eligible Text record with UTF-8 plain text, or HTML without audio formats; mirror file existence is not guaranteed.'),
     summary: z.string().nullable().describe('First entry of summaries, not necessarily primary, or null when the source has none.'),
@@ -276,7 +298,7 @@ tool('gutenberg_get_book', {
 })
 ```
 
-**`format()` rendering:** title, contributors (with years), subjects, bookshelves, languages, copyright, downloads in the last 30 days at the source snapshot, summaries, source notes, readability flags, and all formats. Empty collections read `None`; unavailable nullable fields read `Not available`. Catalog text is Markdown-escaped. Source notes sit in a fenced `text` block instead, because most hold a URL an agent may copy and escaping would put a backslash inside it. Each format renders as a Markdown link (`[mime](url)`); a record with no formats reads `**Formats:** None`.
+**`format()` rendering:** title, alternative titles, author aliases and links, role-tagged contributors (with years), release date, imprint, reading ease, table of contents, LCC codes, subjects, bookshelves, languages, copyright, downloads in the last 30 days at the source snapshot, summaries, source notes, readability flags, and all formats. Empty collections read `None`; unavailable nullable fields read `Not available`. Catalog text is Markdown-escaped. Source notes sit in a fenced `text` block instead, because most hold a URL an agent may copy and escaping would put a backslash inside it. Each format renders as a Markdown link (`[mime](url)`); a record with no formats reads `**Formats:** None`.
 
 ---
 
@@ -422,13 +444,13 @@ tool('gutenberg_get_text', {
 
 ### `gutenberg_browse_popular`
 
-**Purpose:** Return the most-downloaded books, with optional language, topic, MIME-prefix or copyright filters. Entry point for discovery ("what are the most-read classics?").
+**Purpose:** Rank the most-downloaded books with language, topic, MIME-prefix, copyright, media-type, and LCC filters. Entry point for discovery ("what are the most-read classics?").
 
-**Source:** the same mirror-first search path, first page only (up to 32), with popular sorting and language/topic/MIME/copyright filters. Truncated responses carry a typed `continuation` with tool `gutenberg_search_books` and executable `arguments` preserving all filters. When the local cap cuts a page, continuation repeats page 1; a fully shown page advances to page 2. Empty results preserve requested/applied caps, `shown: 0`, `truncated: false`, criteria and a notice, with no continuation.
+**Source:** the same mirror-first search path, first page only (up to 32), with popular sorting and the shared discovery filters. Media type uses case-insensitive exact equality and LCC uses literal case-insensitive prefixes. Each list matches any entry. An active media-type or LCC filter requires the local mirror. Truncated responses carry a typed `continuation` with tool `gutenberg_search_books` and executable `arguments` preserving all filters. When the local cap cuts a page, continuation repeats page 1; a fully shown page advances to page 2. Empty results preserve requested/applied caps, `shown: 0`, `truncated: false`, criteria and a notice, with no continuation.
 
 ```ts
 tool('gutenberg_browse_popular', {
-  description: 'Browse up to 32 Gutenberg books ordered by downloads in the last 30 days at the source snapshot, optionally filtered by language, topic, MIME prefix or copyright status. Returns IDs, titles, authors, languages, counts, and readability flags.',
+  description: 'Browse up to 32 Gutenberg books ordered by downloads in the last 30 days at the source snapshot, with the shared discovery filters. Returns IDs, titles, authors, languages, LCC codes, media types, counts, and readability flags.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -438,6 +460,8 @@ tool('gutenberg_browse_popular', {
       .describe('Restrict to books in these catalog language codes, exactly as results report them ("en", not "eng"). Example: ["en"] for English only, ["de", "fr"] for German or French, ["ang"] for Old English. Omit for all languages.'),
     topic: z.string().optional()
       .describe('Filter by a subject or bookshelf keyword (case-insensitive phrase match). Example: "science fiction", "adventure", "detective". Applies on top of the language filter.'),
+    media_type: z.array(z.string()).optional(),
+    lcc: z.array(z.string()).optional(),
     limit: z.number().int().min(1).default(20)
       .describe('Requested book limit, capped locally at 32. Default 20.'),
   }),
@@ -451,6 +475,8 @@ tool('gutenberg_browse_popular', {
         birth_year: z.number().nullable(),
         death_year: z.number().nullable(),
       })).describe('Author(s).'),
+      lcc: z.array(z.string()).nullable(),
+      media_type: z.string(),
       languages: z.array(z.string()).describe('Language codes.'),
       download_count: z.number().describe('Downloads in the last 30 days at the source snapshot — the popularity ranking basis.'),
       has_plain_text: z.boolean().describe('True if media_type is "Text" AND a UTF-8 text/plain format is available via gutenberg_get_text.'),
@@ -462,6 +488,10 @@ tool('gutenberg_browse_popular', {
   }),
 
   errors: [{
+    reason: 'filter_requires_mirror', code: JsonRpcErrorCode.ValidationError,
+    when: 'A media type or LCC filter needs the unavailable mirror.',
+    recovery: 'Remove the named filter or initialize the local catalog mirror.', thrownBy: 'service',
+  }, {
     reason: 'catalog_unavailable', code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'The catalog did not respond within its budget.',
     recovery: 'Retry later; changing filters does not resolve an upstream outage.',
@@ -475,7 +505,7 @@ tool('gutenberg_browse_popular', {
 })
 ```
 
-**`format()` rendering:** ranked list with IDs, titles, contributors, languages, downloads in the last 30 days at the source snapshot, readability flags, and requested/applied limits. Enrichment discloses actual truncation and a count ceiling using the same window, with a same-filter popular-search continuation. Catalog text is Markdown-escaped; the criteria and continuation arguments render as JSON in code spans.
+**`format()` rendering:** ranked list with IDs, titles, authors, languages, media type, LCC codes, downloads in the last 30 days at the source snapshot, readability flags, and requested/applied limits. Enrichment discloses actual truncation and a count ceiling using the same window, with a same-filter popular-search continuation. Catalog text is Markdown-escaped; the criteria and continuation arguments render as JSON in code spans.
 
 ---
 
@@ -620,6 +650,7 @@ gutenberg_get_text(id=84, offset=20000, limit=20000)
 | **Passage search is `find` on `gutenberg_get_text`, not a separate tool** | The scan runs over text the server already stores, adds no index, and a separate tool would repeat the fetch path. Callers jump to a quote or heading in one call instead of paging a novel in ~15. |
 | **`find` is scanned by hand, not with a regex** | A regex built from caller text throws on long input, goes super-linear on periodic text, and can start a match inside a surrogate pair. A single linear pass over per-code-unit keys is bounded whatever the text or `find` holds, so `find` needs no length limit. |
 | **Source notes are fenced, not escaped** | Most notes hold a URL an agent may copy; escaping would put a backslash inside it. A fenced `text` block carries them verbatim. |
+| **Mirror-only discovery filters** | Alternative titles widen `query` on the mirror. `author` matches all words to one creator and their aliases, `contributor` matches credited names, and `contents` matches a literal whitespace-normalized phrase. Media type and LCC filter search and browse before counts and pagination. If the mirror cannot answer, these five explicit filters report `filter_requires_mirror` with the filter name. |
 | **`translator` is mirror-only and fails loudly without it** | Gutendex has no translator parameter. Dropping the filter on the live fallback would return an unfiltered list that looks like a match, so the call fails with `translator_requires_mirror` instead. |
 | **Two author-year bounds require one author to meet both** | A book-level OR over the stored extremes lets one author satisfy the start and another the end, which matches neither author's lifespan. The mirror checks per author; the live catalog cannot, and says so in a notice. |
 | **`languages` takes 2–3 letter catalog codes, with no off switch on the raised cap** | The catalog holds three-letter codes (`ang`, `enm`) the old two-character cap rejected. The raised cap only accepts input that was previously rejected and changes no existing call's result, so an off switch would add a mode with nothing to protect; exact matching stays, and a three-letter miss such as `eng` gets a notice that codes match exactly. |
