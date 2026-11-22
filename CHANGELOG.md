@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-11-21
+
+Find Gutenberg editions by creator, contributor, contents, media type, or Library of Congress Classification.
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-11-11
 
 Reads texts over 8 MiB, including Webster's Unabridged Dictionary, keeps verse line breaks in HTML editions, and answers book lookups from the content mirror's per-book RDF record. The mirror lifecycle runs as gutenberg-mcp-server mirror init, refresh, or verify from an npm install.
