@@ -10,26 +10,37 @@ import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 import { normalizeSearchParams } from '@/services/gutendex/types.js';
 import {
+  catalogAsOfSchema,
+  catalogProvenanceTrailer,
+  discoveryAuthors,
+  lccSchema,
+  renderCatalogList,
+} from '../catalog-output.js';
+import {
   discoveryCriteria,
   discoveryFilters,
   discoveryNotice,
   LANGUAGE_CODE_MESSAGE,
+  mirrorSearchFilters,
 } from '../discovery-criteria.js';
 
 export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   title: 'Search Gutenberg Books',
   description:
-    'Search the Project Gutenberg catalog of 78,000+ books. Every query word matches a title or author substring; filter by topic, language, translator, author lifespan, IDs, MIME prefix or copyright status. More than four query words, and the translator filter, require the local mirror. Empty matches succeed with criteria and a notice. Default popularity uses downloads in the last 30 days at the source snapshot. Returns IDs, titles, authors, languages, subjects, counts, and is_readable — use gutenberg_get_book for full metadata.',
+    'Search the Project Gutenberg catalog by title or author. The local mirror also searches alternative titles. Filter by author, contributor, table of contents, topic, language, translator, author lifespan, IDs, media type, Library of Congress Classification, MIME prefix or copyright status. Check each filter’s local mirror requirements. Results include media type, classification, download counts and readability. Use gutenberg_get_book for full metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
+    ...mirrorSearchFilters,
+    media_type: discoveryFilters.media_type,
+    lcc: discoveryFilters.lcc,
     mime_type: discoveryFilters.mime_type,
     copyright: discoveryFilters.copyright,
     query: z
       .string()
       .optional()
       .describe(
-        'Every nonblank whitespace-separated word must match title or author name as a literal substring. The local mirror ignores case and accents; live fallback may require accents and rejects more than four words. Example: "dickens expectations" matches Great Expectations.',
+        'Every word must match the title or an author name as a literal substring. The local mirror also searches alternative titles and ignores case and accents. The live catalog may require accents and accepts at most four words. Example: "dickens expectations".',
       ),
     topic: z
       .string()
@@ -115,6 +126,8 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
               .describe('Author(s) of the work.'),
             languages: z.array(z.string()).describe('Catalog language codes for this edition.'),
             subjects: z.array(z.string()).describe('Library of Congress subject headings.'),
+            media_type: z.string().describe('Catalog media type, such as "Text" or "Sound".'),
+            lcc: lccSchema,
             download_count: z
               .number()
               .describe('Downloads in the last 30 days at the source snapshot.'),
@@ -138,6 +151,11 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   }),
 
   enrichment: {
+    catalogSource: z
+      .enum(['mirror', 'live'])
+      .optional()
+      .describe('Catalog that answered. Omitted when an empty ID list selects nothing.'),
+    catalogAsOf: catalogAsOfSchema.optional(),
     effectiveCriteria: discoveryCriteria.describe(
       'Normalized search criteria, including sort and page defaults.',
     ),
@@ -149,6 +167,7 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       ),
   },
   enrichmentTrailer: {
+    ...catalogProvenanceTrailer,
     effectiveCriteria: {
       render: (value) =>
         markdown().text('Search criteria: ').inlineCode(JSON.stringify(value)).build(),
@@ -156,6 +175,14 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
   },
 
   errors: [
+    {
+      reason: 'filter_requires_mirror',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'An author, contributor, contents, media type or LCC filter was supplied while the local mirror could not answer.',
+      recovery:
+        'Remove the filter named in the error, or ask the server operator to initialize or repair the local catalog mirror.',
+      thrownBy: 'service',
+    },
     {
       reason: 'translator_requires_mirror',
       code: JsonRpcErrorCode.ValidationError,
@@ -240,14 +267,18 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
 
     const notice = await discoveryNotice(criteria, result, ctx);
     if (notice) ctx.enrich.notice(notice);
+    if (result.source === 'mirror' || result.source === 'live')
+      ctx.enrich({ catalogSource: result.source, catalogAsOf: result.catalogAsOf });
 
     return {
       books: result.books.map((b) => ({
         id: b.id,
         title: b.title,
-        authors: b.authors,
+        authors: discoveryAuthors(b.authors),
         languages: b.languages,
         subjects: b.subjects,
+        media_type: b.media_type,
+        lcc: b.lcc,
         download_count: b.download_count,
         has_plain_text: b.has_plain_text,
         is_readable: b.is_readable,
@@ -285,6 +316,9 @@ export const gutenbergSearchBooks = tool('gutenberg_search_books', {
       // content[]-only client needs the empty case stated, not the line dropped.
       lines.push(
         `  Subjects: ${book.subjects.length > 0 ? escapeMarkdownInline(book.subjects.join('; ')) : 'None'}`,
+      );
+      lines.push(
+        `  Media: ${escapeMarkdownInline(book.media_type)} | LCC: ${renderCatalogList(book.lcc)}`,
       );
     }
     if (result.hasMore) {

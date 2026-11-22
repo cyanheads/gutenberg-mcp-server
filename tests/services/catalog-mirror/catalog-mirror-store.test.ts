@@ -30,6 +30,85 @@ function parse(id: number): Book {
 }
 
 describe('catalogStoreSpec', () => {
+  it('upgrades an actual v5 row without a harvest and fills RDF metadata on a later write', async () => {
+    const dir = mkdtempSync(join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-v6-'));
+    const path = join(dir, 'v5.sqlite');
+    const spec = catalogStoreSpec(path);
+    const book = parse(84);
+    const row = rowFromBook(book);
+    const oldRow = { ...row };
+    for (const key of [
+      'alternative_titles',
+      'alternatives_folded',
+      'author_aliases',
+      'author_aliases_folded',
+      'author_webpages',
+      'contents',
+      'contents_folded',
+      'contributors',
+      'contributors_folded',
+      'lcc',
+      'reading_ease',
+      'release_date',
+      'source_imprint',
+    ] as const) {
+      delete oldRow[key];
+    }
+    const v5Columns = Object.fromEntries(
+      Object.entries(spec.columns).filter(([key]) => Object.hasOwn(oldRow, key)),
+    );
+    const old = sqliteMirrorStore({ ...spec, columns: v5Columns, version: 5, migrations: [] });
+    const store = sqliteMirrorStore(spec);
+    try {
+      await old.applyBatch([oldRow], []);
+      await old.writeState({
+        status: 'complete',
+        completedAt: '2026-10-01T00:00:00.000Z',
+        checkpoint: '2026-09-30T00:00:00.000Z',
+        total: 1,
+      });
+      const before = await old.readState();
+      await old.close();
+      const db = await store.raw();
+      expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 6 }]);
+      expect(await store.readState()).toEqual(before);
+      const { rows } = await store.query({ match: 'frankenstein', limit: 2, offset: 0 });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.authors).toBe(
+        '[{"name":"Shelley, Mary Wollstonecraft","birth_year":1797,"death_year":1851}]',
+      );
+      expect(rows[0]).toMatchObject({
+        author_aliases_folded: null,
+        contributors_folded: null,
+        contents_folded: null,
+        alternatives_folded: null,
+        lcc: null,
+      });
+      expect(bookFromRow(rows[0]!)).toMatchObject({
+        authors: [{ ...book.authors[0], aliases: null, webpage: null }],
+        alternative_titles: null,
+        contributors: null,
+        contents: null,
+        lcc: null,
+        reading_ease: null,
+        release_date: null,
+        source_imprint: null,
+      });
+      await store.applyBatch([row], []);
+      const after = await store.query({ match: 'frankenstein', limit: 2, offset: 0 });
+      expect(after.rows).toHaveLength(1);
+      expect(bookFromRow(after.rows[0]!)).toEqual(book);
+      expect(after.rows[0]?.author_aliases_folded).toBe(
+        '[["shelley, mary wollstonecraft godwin","shelley, mary w."]]',
+      );
+      expect((await store.integrityCheck()).ok).toBe(true);
+    } finally {
+      await old.close();
+      await store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('migrates v4 titles and all folds in bounded batches, keeping null translators and FTS current', async () => {
     const dir = mkdtempSync(join(process.env.GUTENBERG_TEST_SCRATCH ?? tmpdir(), 'gutenberg-v5-'));
     const path = join(dir, 'v4.sqlite');
@@ -37,7 +116,9 @@ describe('catalogStoreSpec', () => {
     const base = rowFromBook({
       ...parse(84),
       title: 'Peter Pan : $b Édition',
-      authors: [{ name: 'Molière', birth_year: null, death_year: null }],
+      authors: [
+        { name: 'Molière', birth_year: null, death_year: null, aliases: null, webpage: null },
+      ],
       subjects: ['Œuvres'],
       bookshelves: ['Über'],
       translators: [{ name: 'Édouard', birth_year: null, death_year: null }],
@@ -148,7 +229,9 @@ describe('catalogStoreSpec', () => {
         ...rowFromBook({
           ...parse(84),
           title: 'ÉLÉPHANT % _',
-          authors: [{ name: 'ÅNGSTRÖM', birth_year: null, death_year: 1900 }],
+          authors: [
+            { name: 'ÅNGSTRÖM', birth_year: null, death_year: 1900, aliases: null, webpage: null },
+          ],
           subjects: ['ÉTUDES'],
           bookshelves: ['Über Bücher'],
         }),
@@ -197,7 +280,15 @@ describe('catalogStoreSpec', () => {
             ...parse(84),
             id: 1001,
             title: 'Renamed Ωμέγα',
-            authors: [{ name: 'Newauthor', birth_year: null, death_year: null }],
+            authors: [
+              {
+                name: 'Newauthor',
+                birth_year: null,
+                death_year: null,
+                aliases: null,
+                webpage: null,
+              },
+            ],
           }),
         ],
         [],
@@ -323,7 +414,7 @@ describe('catalogStoreSpec', () => {
               .all(),
           ).toEqual([{ translators_folded: '["grenier, edouard","maude, louise"]' }]);
           expect(await store.readState()).toEqual(before);
-          expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 5 }]);
+          expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 6 }]);
           expect((await store.integrityCheck()).ok).toBe(true);
 
           for (const translator of ['ÉDOUARD', 'louise grenier']) {
@@ -394,7 +485,7 @@ describe('catalogStoreSpec', () => {
       try {
         expect(await columnNames(store)).toContain('translators_folded');
         const db = await store.raw();
-        expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 5 }]);
+        expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 6 }]);
         expect(await updateTrigger(store)).toHaveLength(1);
         await store.applyBatch([rowFromBook(parse(1399))], []);
         const { rows } = await store.query({ limit: 1, offset: 0 });

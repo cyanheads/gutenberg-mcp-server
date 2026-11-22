@@ -8,30 +8,34 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline, markdown, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
+import type { Person } from '@/services/gutendex/types.js';
+import {
+  catalogAsOfSchema,
+  catalogProvenanceTrailer,
+  lccSchema,
+  renderCatalogList,
+} from '../catalog-output.js';
+
+/** Render a credited person's name and both lifespan bounds. */
+function renderPerson(person: Person): string {
+  const name = escapeMarkdownInline(person.name);
+  return person.birth_year === null && person.death_year === null
+    ? name
+    : `${name} (${person.birth_year ?? '?'}–${person.death_year ?? '?'})`;
+}
 
 /**
  * Render a person list for `content[]`, stating an empty list explicitly so a
  * content[]-only client can tell "no editors" from "editors not reported".
  */
-function renderPeople(
-  people: readonly { name: string; birth_year: number | null; death_year: number | null }[],
-): string {
-  if (people.length === 0) return 'None';
-  return people
-    .map((p) => {
-      const years =
-        p.birth_year != null || p.death_year != null
-          ? ` (${p.birth_year ?? '?'}–${p.death_year ?? '?'})`
-          : '';
-      return `${escapeMarkdownInline(p.name)}${years}`;
-    })
-    .join(', ');
+function renderPeople(people: readonly Person[]): string {
+  return people.length ? people.map(renderPerson).join(', ') : 'None';
 }
 
 export const gutenbergGetBook = tool('gutenberg_get_book', {
   title: 'Get Gutenberg Book',
   description:
-    'Fetch complete metadata for a Project Gutenberg book by ID — title, authors (with birth/death years), translators, editors, source bibliographic notes, subjects, bookshelves, languages, copyright status, and the full formats map with download URLs (plain text, HTML, EPUB, cover image, etc.). Use is_readable before gutenberg_get_text; source_notes may identify specific editions.',
+    'Fetch Project Gutenberg metadata by book ID: titles, author names and aliases, translators, editors, contributor credits, edition notes, release date, imprint, reading ease, table of contents, subjects, classification, and available formats. Use is_readable before gutenberg_get_text.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -47,6 +51,12 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
   output: z.object({
     id: z.number().describe('Gutenberg ID.'),
     title: z.string().describe('Book title.'),
+    alternative_titles: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'Alternative titles in catalog order. [] means none in the RDF; null means unavailable.',
+      ),
     authors: z
       .array(
         z
@@ -57,6 +67,16 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
               .number()
               .nullable()
               .describe('Death year, or null if unknown or still living.'),
+            aliases: z
+              .array(z.string())
+              .nullable()
+              .describe(
+                'Catalog aliases in order. [] means none in the RDF; null means unavailable.',
+              ),
+            webpage: z
+              .string()
+              .nullable()
+              .describe('English Wikipedia page supplied by the catalog, or null.'),
           })
           .describe('Author entry.'),
       )
@@ -83,7 +103,26 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
           .describe('Editor entry.'),
       )
       .describe('Editors, if any.'),
+    contributors: z
+      .array(
+        z
+          .object({
+            name: z.string().describe('Contributor name.'),
+            role: z.string().describe('MARC relator label, or the catalog code when unmapped.'),
+            birth_year: z.number().nullable().describe('Birth year, or null if unknown.'),
+            death_year: z
+              .number()
+              .nullable()
+              .describe('Death year, or null if unknown or still living.'),
+          })
+          .describe('Contributor credit.'),
+      )
+      .nullable()
+      .describe(
+        'Source credits beyond authors, editors and translators. [] means none in the RDF; null means unavailable.',
+      ),
     subjects: z.array(z.string()).describe('Library of Congress subject headings.'),
+    lcc: lccSchema,
     bookshelves: z
       .array(z.string())
       .describe(
@@ -112,6 +151,22 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       .describe(
         'Source-provided RDF bibliographic notes in document order, including explicit edition references. [] means inspected with no notes; null means unavailable from this source.',
       ),
+    release_date: z
+      .string()
+      .nullable()
+      .describe('Project Gutenberg ebook release date (YYYY-MM-DD), or null if unavailable.'),
+    source_imprint: z
+      .string()
+      .nullable()
+      .describe('Catalog imprint statement, or null if unavailable.'),
+    reading_ease: z
+      .string()
+      .nullable()
+      .describe('Catalog reading-ease note, or null if unavailable.'),
+    contents: z
+      .string()
+      .nullable()
+      .describe('Catalog table of contents with source line breaks, or null if unavailable.'),
     is_readable: z
       .boolean()
       .describe(
@@ -137,6 +192,14 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
         'True if media_type is "Text" and "text/plain; charset=utf-8" is present. HTML-only editions can still have is_readable=true.',
       ),
   }),
+
+  enrichment: {
+    catalogSource: z
+      .enum(['mirror', 'rdf'])
+      .describe('Catalog that answered: local mirror or per-book RDF.'),
+    catalogAsOf: catalogAsOfSchema,
+  },
+  enrichmentTrailer: catalogProvenanceTrailer,
 
   errors: [
     {
@@ -168,8 +231,8 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
   async handler(input, ctx) {
     ctx.log.info('Fetching book metadata', { id: input.id });
 
-    const book = await getGutendexService()
-      .getBook(input.id, ctx)
+    const { book, source, catalogAsOf } = await getGutendexService()
+      .getBookWithProvenance(input.id, ctx)
       .catch((err: unknown) => {
         // The service throws a raw NotFound for a missing ID; re-throw through
         // ctx.fail so the declared not_found recovery hint reaches both the
@@ -181,14 +244,18 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
         }
         throw err;
       });
+    ctx.enrich({ catalogSource: source, catalogAsOf });
 
     return {
       id: book.id,
       title: book.title,
+      alternative_titles: book.alternative_titles,
       authors: book.authors,
       translators: book.translators,
       editors: book.editors,
+      contributors: book.contributors,
       subjects: book.subjects,
+      lcc: book.lcc,
       bookshelves: book.bookshelves,
       languages: book.languages,
       copyright: book.copyright,
@@ -200,6 +267,10 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       has_plain_text: book.has_plain_text,
       is_readable: book.is_readable,
       source_notes: book.source_notes,
+      release_date: book.release_date,
+      source_imprint: book.source_imprint,
+      reading_ease: book.reading_ease,
+      contents: book.contents,
     };
   },
 
@@ -212,19 +283,39 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
     );
 
     lines.push(`**Authors:** ${renderPeople(result.authors)}`);
+    for (const [index, author] of result.authors.entries()) {
+      const webpage =
+        author.webpage === null ? 'Not available' : markdownLink(author.webpage, author.webpage);
+      lines.push(
+        `**Author ${index + 1} aliases:** ${renderCatalogList(author.aliases)} | Webpage: ${webpage}`,
+      );
+    }
     lines.push(`**Translators:** ${renderPeople(result.translators)}`);
     lines.push(`**Editors:** ${renderPeople(result.editors)}`);
+    if (result.contributors?.length) {
+      lines.push('**Contributors:**');
+      for (const contributor of result.contributors)
+        lines.push(
+          `  - ${renderPerson(contributor)} | Role: ${escapeMarkdownInline(contributor.role)}`,
+        );
+      lines.push('');
+    } else {
+      lines.push(`**Contributors:** ${result.contributors === null ? 'Not available' : 'None'}`);
+    }
+    lines.push(`**Alternative titles:** ${renderCatalogList(result.alternative_titles)}`);
 
     lines.push(
       `**Languages:** ${result.languages.map(escapeMarkdownInline).join(', ')} | **Copyright:** ${result.copyright === false ? 'Public Domain (USA)' : result.copyright === true ? 'Under Copyright' : 'Unknown'}`,
     );
 
+    lines.push(`**Subjects:** ${renderCatalogList(result.subjects)}`);
+    lines.push(`**LCC:** ${renderCatalogList(result.lcc)}`);
+    lines.push(`**Bookshelves:** ${renderCatalogList(result.bookshelves)}`);
+    lines.push(`**Release date:** ${escapeMarkdownInline(result.release_date ?? 'Not available')}`);
     lines.push(
-      `**Subjects:** ${result.subjects.length > 0 ? escapeMarkdownInline(result.subjects.join('; ')) : 'None'}`,
+      `**Source imprint:** ${escapeMarkdownInline(result.source_imprint ?? 'Not available')}`,
     );
-    lines.push(
-      `**Bookshelves:** ${result.bookshelves.length > 0 ? escapeMarkdownInline(result.bookshelves.join('; ')) : 'None'}`,
-    );
+    lines.push(`**Reading ease:** ${escapeMarkdownInline(result.reading_ease ?? 'Not available')}`);
 
     lines.push('');
     lines.push(
@@ -255,6 +346,14 @@ export const gutenbergGetBook = tool('gutenberg_get_book', {
       }
     } else {
       lines.push('**Additional summaries:** None');
+    }
+
+    lines.push('');
+    if (result.contents === null) {
+      lines.push('**Contents:** Not available');
+    } else {
+      lines.push('**Contents:**');
+      lines.push(markdown().codeBlock(result.contents.replace(/\r\n?/g, '\n'), 'text').build());
     }
 
     lines.push('');

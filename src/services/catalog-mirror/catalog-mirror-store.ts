@@ -14,6 +14,8 @@
 import type { MirrorRow, SqliteMirrorStoreSpec } from '@cyanheads/mcp-ts-core/mirror';
 import {
   type Book,
+  type Contributor,
+  foldCatalogPhrase,
   foldCatalogText,
   isReadable,
   normalizeTitle,
@@ -35,11 +37,30 @@ export const CATALOG_FTS_COLUMNS = [
   'languages_text',
 ] as const;
 
+/** RDF metadata added without a backfill. Old rows remain readable until the next harvest. */
+const RDF_METADATA_COLUMNS = {
+  alternative_titles: 'TEXT',
+  alternatives_folded: 'TEXT',
+  author_aliases: 'TEXT',
+  author_aliases_folded: 'TEXT',
+  author_webpages: 'TEXT',
+  contents: 'TEXT',
+  contents_folded: 'TEXT',
+  contributors: 'TEXT',
+  contributors_folded: 'TEXT',
+  lcc: 'TEXT',
+  reading_ease: 'TEXT',
+  release_date: 'TEXT',
+  source_imprint: 'TEXT',
+} as const;
+
 /** Separator joining a list's values in a flattened FTS column. */
 const FLATTEN_SEPARATOR = '\n';
 
 /** One stored catalog row. */
-export interface CatalogBookRow extends MirrorRow {
+export interface CatalogBookRow
+  extends MirrorRow,
+    Partial<Record<keyof typeof RDF_METADATA_COLUMNS, string | null>> {
   author_birth_max: number | null;
   author_birth_min: number | null;
   author_death_max: number | null;
@@ -97,7 +118,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: CATALOG_TABLE,
     primaryKey: 'id',
-    version: 5,
+    version: 6,
     migrations: [
       {
         version: 2,
@@ -251,6 +272,20 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
           db.exec(updateTrigger);
         },
       },
+      {
+        version: 6,
+        up(db) {
+          const existing = new Set(
+            db
+              .prepare<{ name: string }>('PRAGMA table_info(books)')
+              .all()
+              .map(({ name }) => name),
+          );
+          for (const [name, type] of Object.entries(RDF_METADATA_COLUMNS)) {
+            if (!existing.has(name)) db.exec(`ALTER TABLE books ADD COLUMN ${name} ${type}`);
+          }
+        },
+      },
     ],
     columns: {
       id: 'INTEGER',
@@ -281,6 +316,7 @@ export function catalogStoreSpec(path: string): SqliteMirrorStoreSpec {
       author_birth_max: 'INTEGER',
       author_death_min: 'INTEGER',
       author_death_max: 'INTEGER',
+      ...RDF_METADATA_COLUMNS,
     },
     fts: [...CATALOG_FTS_COLUMNS],
     indexes: [{ columns: ['download_count'] }],
@@ -318,19 +354,39 @@ function lifespanRange(
 export function rowFromBook(book: Book): CatalogBookRow {
   const birth = lifespanRange(book.authors, 'birth_year');
   const death = lifespanRange(book.authors, 'death_year');
+  const aliases = book.authors.map((author) => author.aliases);
   return {
     ...foldedFields(book.title, book.authors, book.subjects, book.bookshelves),
     translators_folded: foldedNames(book.translators),
     id: book.id,
     title: book.title,
-    authors: JSON.stringify(book.authors),
+    authors: JSON.stringify(
+      book.authors.map(({ name, birth_year, death_year }) => ({
+        name,
+        birth_year,
+        death_year,
+      })),
+    ),
+    author_aliases: JSON.stringify(aliases),
+    author_aliases_folded: JSON.stringify(aliases.map((list) => list?.map(foldCatalogText) ?? [])),
+    author_webpages: JSON.stringify(book.authors.map((author) => author.webpage)),
+    alternative_titles: nullableJson(book.alternative_titles),
+    alternatives_folded: nullableJson(book.alternative_titles?.map(foldCatalogText) ?? null),
+    contents: book.contents,
+    contents_folded: book.contents === null ? null : foldCatalogPhrase(book.contents),
+    contributors: nullableJson(book.contributors),
+    contributors_folded: book.contributors === null ? null : foldedNames(book.contributors),
+    lcc: nullableJson(book.lcc),
+    reading_ease: book.reading_ease,
+    release_date: book.release_date,
+    source_imprint: book.source_imprint,
     translators: JSON.stringify(book.translators),
     editors: JSON.stringify(book.editors),
     subjects: JSON.stringify(book.subjects),
     bookshelves: JSON.stringify(book.bookshelves),
     languages: JSON.stringify(book.languages),
     summaries: JSON.stringify(book.summaries),
-    source_notes: book.source_notes === null ? null : JSON.stringify(book.source_notes),
+    source_notes: nullableJson(book.source_notes),
     formats: JSON.stringify(book.formats),
     copyright: book.copyright === null ? null : Number(book.copyright),
     media_type: book.media_type,
@@ -352,15 +408,36 @@ function parseJson<T>(value: unknown): T {
   return JSON.parse(String(value)) as T;
 }
 
+function nullableJson(value: unknown): string | null {
+  return value === null ? null : JSON.stringify(value);
+}
+
+function parseNullableJson<T>(value: unknown): T | null {
+  return value == null ? null : parseJson<T>(value);
+}
+
 /** Translate a stored row back into the normalized book shape the live path returns. */
 export function bookFromRow(row: MirrorRow): Book {
   const summaries = parseJson<string[]>(row.summaries);
   const formats = parseJson<Record<string, string>>(row.formats);
   const media_type = String(row.media_type);
+  const aliases = parseNullableJson<(string[] | null)[]>(row.author_aliases);
+  const webpages = parseNullableJson<(string | null)[]>(row.author_webpages);
   return {
     id: Number(row.id),
     title: String(row.title),
-    authors: parseJson<Person[]>(row.authors),
+    authors: parseJson<Person[]>(row.authors).map((author, index) => ({
+      ...author,
+      aliases: aliases?.[index] ?? null,
+      webpage: webpages?.[index] ?? null,
+    })),
+    alternative_titles: parseNullableJson<string[]>(row.alternative_titles),
+    contents: typeof row.contents === 'string' ? row.contents : null,
+    contributors: parseNullableJson<Contributor[]>(row.contributors),
+    lcc: parseNullableJson<string[]>(row.lcc),
+    reading_ease: typeof row.reading_ease === 'string' ? row.reading_ease : null,
+    release_date: typeof row.release_date === 'string' ? row.release_date : null,
+    source_imprint: typeof row.source_imprint === 'string' ? row.source_imprint : null,
     translators: parseJson<Person[]>(row.translators),
     editors: parseJson<Person[]>(row.editors),
     subjects: parseJson<string[]>(row.subjects),
@@ -371,7 +448,7 @@ export function bookFromRow(row: MirrorRow): Book {
     download_count: Number(row.download_count),
     summaries,
     summary: summaries[0] ?? null,
-    source_notes: row.source_notes == null ? null : parseJson<string[]>(row.source_notes),
+    source_notes: parseNullableJson<string[]>(row.source_notes),
     formats,
     is_readable: isReadable({ media_type, formats }),
     has_plain_text: Boolean(row.has_plain_text),

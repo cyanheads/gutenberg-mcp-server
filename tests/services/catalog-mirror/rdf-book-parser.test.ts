@@ -30,6 +30,78 @@ function parse(id: number): Book {
 }
 
 describe('parseBookRdf — field mapping', () => {
+  it('trims ordinary metadata and keeps legacy editor and translator credits separate', () => {
+    const xml =
+      '<rdf:RDF><pgterms:ebook><dcterms:title>  Edition  </dcterms:title><marcrel:edt><pgterms:agent><pgterms:name>  Editor  </pgterms:name></pgterms:agent></marcrel:edt><marcrel:trl><pgterms:agent><pgterms:name>Translator</pgterms:name></pgterms:agent></marcrel:trl></pgterms:ebook></rdf:RDF>';
+    expect(parseBookRdf(xml, 1)).toMatchObject({
+      title: 'Edition',
+      editors: [{ name: 'Editor', birth_year: null, death_year: null }],
+      translators: [{ name: 'Translator', birth_year: null, death_year: null }],
+    });
+  });
+
+  it('reads edition metadata from the ebook and pairs names, aliases, and webpages within each agent', () => {
+    const xml = `<rdf:RDF><pgterms:ebook>
+      <dcterms:creator><pgterms:agent><pgterms:alias>Ignored</pgterms:alias></pgterms:agent></dcterms:creator>
+      <dcterms:creator><pgterms:agent><pgterms:name>Twain, Mark</pgterms:name><pgterms:alias>Clemens, Samuel</pgterms:alias><pgterms:alias>Clemens, S.</pgterms:alias><pgterms:webpage rdf:resource="https://fr.wikipedia.org/wiki/Mark_Twain"/><pgterms:webpage rdf:resource="https://en.wikipedia.org/wiki/Mark_Twain"/></pgterms:agent></dcterms:creator>
+      <dcterms:creator><pgterms:agent><pgterms:name>Second</pgterms:name></pgterms:agent></dcterms:creator>
+      <dcterms:alternative>First alternate</dcterms:alternative>
+      <dcterms:alternative>Second alternate</dcterms:alternative>
+      <marcrel:ill><pgterms:agent><pgterms:name>Kemble, E. W.</pgterms:name></pgterms:agent></marcrel:ill>
+      <marcrel:xyz><pgterms:agent><pgterms:name>Kemble, E. W.</pgterms:name></pgterms:agent></marcrel:xyz>
+      <marcrel:xyz><pgterms:agent><pgterms:birthdate>1800</pgterms:birthdate></pgterms:agent></marcrel:xyz>
+      <marcrel:trl><pgterms:agent><pgterms:name>Translator</pgterms:name></pgterms:agent></marcrel:trl>
+      <marcrel:edt><pgterms:agent><pgterms:name>Editor</pgterms:name></pgterms:agent></marcrel:edt>
+      <dcterms:hasFormat><pgterms:file><dcterms:issued>2000-01-02</dcterms:issued><dcterms:alternative>Nested title</dcterms:alternative><pgterms:marc908>Nested score</pgterms:marc908></pgterms:file></dcterms:hasFormat>
+      <dcterms:tableOfContents>  A &amp; B&#13;
+C  </dcterms:tableOfContents>
+      <dcterms:issued>1999-03-01</dcterms:issued>
+      <pgterms:marc908>Reading ease score: 65.0 (8th &amp; 9th grade).</pgterms:marc908>
+      <pgterms:marc260>  $aUnited States :$bself-published, $c1926. Costs $5. </pgterms:marc260>
+      <dcterms:subject><rdf:Description><dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCC"/><rdf:value>PS</rdf:value></rdf:Description></dcterms:subject>
+      <dcterms:subject><rdf:Description><dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCSH"/><rdf:value>Fiction</rdf:value></rdf:Description></dcterms:subject>
+      <dcterms:subject><rdf:Description><dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCC"/><rdf:value>QA76</rdf:value></rdf:Description></dcterms:subject>
+      <dcterms:subject><rdf:Description><dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCC"/><rdf:value>PS</rdf:value></rdf:Description></dcterms:subject>
+    </pgterms:ebook></rdf:RDF>`;
+    expect(parseBookRdf(xml, 1)).toMatchObject({
+      authors: [
+        {
+          name: 'Twain, Mark',
+          aliases: ['Clemens, Samuel', 'Clemens, S.'],
+          webpage: 'https://en.wikipedia.org/wiki/Mark_Twain',
+        },
+        { name: 'Second', aliases: [], webpage: null },
+      ],
+      alternative_titles: ['First alternate', 'Second alternate'],
+      contributors: [
+        { name: 'Kemble, E. W.', role: 'Illustrator', birth_year: null, death_year: null },
+        { name: 'Kemble, E. W.', role: 'xyz', birth_year: null, death_year: null },
+      ],
+      contents: '  A & B\r\nC  ',
+      release_date: '1999-03-01',
+      reading_ease: 'Reading ease score: 65.0 (8th & 9th grade).',
+      source_imprint: 'United States : self-published, 1926. Costs $5.',
+      subjects: ['Fiction'],
+      lcc: ['PS', 'QA76'],
+    });
+  });
+
+  it.each([
+    ['[S.l. : $b s.n.], $c 1853', '[S.l. : s.n.], 1853'],
+    [
+      '$United Kingdom :$bA. and C. Black Ltd.,$c1911.',
+      'United Kingdom : A. and C. Black Ltd., 1911.',
+    ],
+    [
+      'Boston&#13;\nLittle, Brown, And Company&#13;\n1906',
+      'Boston Little, Brown, And Company 1906',
+    ],
+    [' $a  ', null],
+  ])('normalizes the imprint %s', (value, expected) => {
+    const xml = `<rdf:RDF><pgterms:ebook><pgterms:marc260>${value}</pgterms:marc260></pgterms:ebook></rdf:RDF>`;
+    expect(parseBookRdf(xml, 1)?.source_imprint).toBe(expected);
+  });
+
   it('preserves direct bibliographic notes and excludes nested file descriptions', () => {
     expect(parse(84)).toMatchObject({
       source_notes: expect.arrayContaining([
@@ -56,7 +128,13 @@ describe('parseBookRdf — field mapping', () => {
     expect(book.id).toBe(84);
     expect(book.title).toBe('Frankenstein; or, the modern prometheus');
     expect(book.authors).toEqual([
-      { name: 'Shelley, Mary Wollstonecraft', birth_year: 1797, death_year: 1851 },
+      {
+        name: 'Shelley, Mary Wollstonecraft',
+        birth_year: 1797,
+        death_year: 1851,
+        aliases: ['Shelley, Mary Wollstonecraft Godwin', 'Shelley, Mary W.'],
+        webpage: 'https://en.wikipedia.org/wiki/Mary_Wollstonecraft_Shelley',
+      },
     ]);
     expect(book.editors).toEqual([]);
     expect(book.translators).toEqual([]);
@@ -65,6 +143,9 @@ describe('parseBookRdf — field mapping', () => {
     expect(book.media_type).toBe('Text');
     expect(book.download_count).toBe(58824);
     expect(book.has_plain_text).toBe(true);
+    expect(book.reading_ease).toBe(
+      'Reading ease score: 65.0 (8th & 9th grade). Neither easy nor difficult to read.',
+    );
   });
 
   it('keeps only Library of Congress subject headings, sorted', () => {
@@ -81,6 +162,7 @@ describe('parseBookRdf — field mapping', () => {
     /** The record also carries an LCC classification (`PR`); only LCSH values are subjects. */
     expect(book.subjects).not.toContain('PR');
     expect(readRdf(84)).toContain('LCC');
+    expect(book.lcc).toEqual(['PR']);
   });
 
   it('sorts bookshelves', () => {
@@ -122,9 +204,27 @@ describe('parseBookRdf — field mapping', () => {
 
   it('reads several authors in document order, including BCE lifespans and unknown years', () => {
     expect(parse(10056).authors).toEqual([
-      { name: 'Confucius', birth_year: -551, death_year: -479 },
-      { name: 'Faxian', birth_year: null, death_year: null },
-      { name: 'Mencius', birth_year: -385, death_year: -289 },
+      {
+        name: 'Confucius',
+        birth_year: -551,
+        death_year: -479,
+        aliases: ['孔子'],
+        webpage: 'https://en.wikipedia.org/wiki/Confucius',
+      },
+      {
+        name: 'Faxian',
+        birth_year: null,
+        death_year: null,
+        aliases: ['Fa-hsien', '法顯'],
+        webpage: 'https://en.wikipedia.org/wiki/Faxian',
+      },
+      {
+        name: 'Mencius',
+        birth_year: -385,
+        death_year: -289,
+        aliases: ['孟子', 'Mengzi'],
+        webpage: 'https://en.wikipedia.org/wiki/Mencius',
+      },
     ]);
   });
 
@@ -152,6 +252,14 @@ describe('parseBookRdf — field mapping', () => {
     expect(book.summary).toBeNull();
     expect(book.has_plain_text).toBe(false);
     expect(book.download_count).toBe(47);
+    expect(book).toMatchObject({
+      alternative_titles: [],
+      contributors: [],
+      contents: null,
+      lcc: [],
+      reading_ease: null,
+      source_imprint: null,
+    });
   });
 
   it('preserves non-ASCII text and a non-English language code', () => {
@@ -251,7 +359,15 @@ describe('parseBookRdf — parity with the live Gutendex record', () => {
           field === 'title' && id === 10056
             ? 'Chinese literature: Comprising the Analects of Confucius, the Sayings of Mencius, the Shi-King, the Travels of Fâ-Hien, and the Sorrows of Han'
             : live[field];
-        expect(sortDeep(mine[field]), `field ${field}`).toEqual(sortDeep(expected));
+        const actual =
+          field === 'authors'
+            ? parse(id).authors.map(({ name, birth_year, death_year }) => ({
+                name,
+                birth_year,
+                death_year,
+              }))
+            : mine[field];
+        expect(sortDeep(actual), `field ${field}`).toEqual(sortDeep(expected));
       }
     },
   );
@@ -259,6 +375,18 @@ describe('parseBookRdf — parity with the live Gutendex record', () => {
   it('adds computed fields and RDF-only bibliographic notes to the live shape', () => {
     const live = JSON.parse(readFileSync(new URL('84.json', GUTENDEX_DIR), 'utf8')) as object;
     const extra = Object.keys(parse(84)).filter((key) => !(key in live));
-    expect(extra.sort()).toEqual(['has_plain_text', 'is_readable', 'source_notes', 'summary']);
+    expect(extra.sort()).toEqual([
+      'alternative_titles',
+      'contents',
+      'contributors',
+      'has_plain_text',
+      'is_readable',
+      'lcc',
+      'reading_ease',
+      'release_date',
+      'source_imprint',
+      'source_notes',
+      'summary',
+    ]);
   });
 });

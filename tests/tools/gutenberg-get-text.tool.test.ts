@@ -48,7 +48,15 @@ const mockTextService = { fetchAndCacheText: vi.fn(), chunkText: vi.fn(), findPa
 const textBook = {
   id: 84,
   title: 'Frankenstein',
-  authors: [{ name: 'Shelley, Mary Wollstonecraft', birth_year: 1797, death_year: 1851 }],
+  authors: [
+    {
+      name: 'Shelley, Mary Wollstonecraft',
+      birth_year: 1797,
+      death_year: 1851,
+      aliases: null,
+      webpage: null,
+    },
+  ],
   translators: [],
   editors: [],
   subjects: ['Horror tales'],
@@ -65,6 +73,13 @@ const textBook = {
   has_plain_text: true,
   is_readable: true,
   source_notes: null,
+  alternative_titles: null,
+  contributors: null,
+  contents: null,
+  release_date: null,
+  source_imprint: null,
+  reading_ease: null,
+  lcc: null,
 };
 
 const audioBook = {

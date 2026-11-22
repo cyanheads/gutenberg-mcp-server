@@ -47,6 +47,7 @@ const mockBook = {
   formats: { 'text/plain; charset=utf-8': 'https://www.gutenberg.org/ebooks/1342.txt.utf-8' },
   has_plain_text: true,
   is_readable: true,
+  lcc: null,
 };
 
 const mockGutendexService = {
@@ -60,6 +61,75 @@ beforeEach(() => {
 });
 
 describe('gutenbergSearchBooks', () => {
+  it('reports mirror provenance, row classifications and normalized search filters without widening authors', async () => {
+    const author = { name: 'Austen, Jane', birth_year: 1775, death_year: 1817 };
+    mockGutendexService.searchBooks.mockResolvedValue({
+      books: [
+        {
+          ...mockBook,
+          authors: [
+            {
+              ...author,
+              aliases: ['J. Austen'],
+              webpage: 'https://en.wikipedia.org/wiki/Jane_Austen',
+            },
+          ],
+          media_type: 'Sound',
+          lcc: ['PR'],
+        },
+      ],
+      totalCount: 33,
+      page: 2,
+      hasMore: false,
+      source: 'mirror',
+      catalogAsOf: '2026-11-15T15:40:13.000Z',
+    });
+    const result = await runToolContract(gutenbergSearchBooks, {
+      author: '  austen   jane ',
+      contributor: ' reader ',
+      contents: ' chapter\n one ',
+      media_type: [' Sound ', ''],
+      lcc: [' pr '],
+      page: 2,
+    });
+    const criteria = {
+      author: 'austen jane',
+      contributor: 'reader',
+      contents: 'chapter one',
+      media_type: ['Sound'],
+      lcc: ['pr'],
+      sort: 'popular',
+      page: 2,
+    };
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      books: [{ media_type: 'Sound', lcc: ['PR'] }],
+      totalCount: 33,
+      page: 2,
+      hasMore: false,
+      effectiveCriteria: criteria,
+      catalogSource: 'mirror',
+      catalogAsOf: '2026-11-15T15:40:13.000Z',
+    });
+    expect(
+      (result.structuredContent as { books: { authors: unknown[] }[] }).books[0]?.authors,
+    ).toEqual([author]);
+    const read = readBack(contentText(result));
+    expect(JSON.parse(read.codeSpans[0]!)).toEqual(criteria);
+    expect(read.text).toContain('Media: Sound | LCC: PR');
+    expect(read.text).toContain('Catalog source: mirror\nCatalog as of: 2026-11-15T15:40:13.000Z');
+  });
+
+  it('rejects an invalid LCC array item before executing discovery', async () => {
+    const input: Record<string, unknown> = { lcc: [{ code: 'PS' }] };
+    const result = await runToolContract(gutenbergSearchBooks, input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_arguments' } },
+    });
+    expect(mockGutendexService.searchBooks).not.toHaveBeenCalled();
+  });
+
   it('echoes normalized filters and returns empty success on both surfaces', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
       books: [],
@@ -70,6 +140,7 @@ describe('gutenbergSearchBooks', () => {
     const result = await runToolContract(gutenbergSearchBooks, {
       query: '  austen   ',
       topic: ' ',
+      media_type: ['sound'],
       languages: [],
       ids: [],
       mime_type: 'text/plain',
@@ -92,6 +163,10 @@ describe('gutenbergSearchBooks', () => {
     const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
     expect(text).toContain('austen');
     expect(text).toContain('empty ID selection');
+    expect(text).not.toContain('Catalog source:');
+    expect(text).not.toContain('Catalog as of:');
+    expect(result.structuredContent).not.toHaveProperty('catalogSource');
+    expect(result.structuredContent).not.toHaveProperty('catalogAsOf');
     expect(mockGutendexService.searchBooks).not.toHaveBeenCalled();
   });
   it('carries HTML readability and the snapshot popularity window on both surfaces', async () => {
@@ -327,6 +402,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 75000,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 1,
@@ -366,6 +443,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 75000,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 1,
@@ -393,6 +472,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 1,
             has_plain_text: false,
             is_readable: false,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 100,
@@ -418,6 +499,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 12,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 1,
@@ -440,6 +523,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 5,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
           {
             id: 2,
@@ -450,6 +535,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 4,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 2,
@@ -475,6 +562,8 @@ describe('gutenbergSearchBooks', () => {
             download_count: 10,
             has_plain_text: false,
             is_readable: false,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalCount: 1,
@@ -532,6 +621,8 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
     download_count: 75000,
     has_plain_text: true,
     is_readable: true,
+    media_type: 'Text',
+    lcc: null,
   };
   const page = (books: Row[]): SearchOutput => ({
     books,
@@ -550,6 +641,7 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
         `[${book.id}] ${book.title}`,
         `Authors: ${authors.join(', ') || 'Unknown'} | Lang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: Yes | Readable: Yes`,
         `Subjects: ${book.subjects.join('; ') || 'None'}`,
+        `Media: ${book.media_type} | LCC: ${book.lcc === null ? 'Not available' : book.lcc.join('; ') || 'None'}`,
       ];
     });
     return `${books.length} books found (page 1)\n\n${lines.join('\n')}`;
@@ -563,6 +655,9 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
     ['an author name', { authors: [row.authors[0]!, active] }],
     ['a language', { languages: ['en', ACTIVE_MARKDOWN] }],
     ['a subject', { subjects: ['Fiction', ACTIVE_MARKDOWN] }],
+    ['a media type', { media_type: ACTIVE_MARKDOWN }],
+    ['an LCC value', { lcc: ['PS', ACTIVE_MARKDOWN] }],
+    ['an empty LCC list', { lcc: [] }],
   ])('reads %s back unchanged', (_slot, change) => {
     const books = [{ ...row, ...change }, row];
     expect(readBack(render(books)).text).toBe(wantRows(books));
@@ -627,7 +722,14 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
   });
 
   describe('criteria trailer', () => {
-    const empty = { books: [], totalCount: 0, hasMore: false, page: 1, source: 'mirror' };
+    const empty = {
+      books: [],
+      totalCount: 0,
+      hasMore: false,
+      page: 1,
+      source: 'mirror',
+      catalogAsOf: null,
+    };
 
     it.each<[string, Record<string, unknown>, string]>([
       ['emphasis', { query: '*war*' }, '{"query":"*war*","sort":"popular","page":1}'],
@@ -695,17 +797,22 @@ describe('gutenbergSearchBooks — content[] reads back as structuredContent', (
     });
 
     it('keeps the criteria line and notice on an empty result, the structured echo unchanged', async () => {
+      const notice =
+        'No books matched these criteria. Broaden or remove the supplied filters: query. If you are searching for a creator by an alias, use the author filter.';
       mockGutendexService.searchBooks.mockResolvedValue(empty);
       const result = await runToolContract(gutenbergSearchBooks, { query: '*war*' });
       expect(result.structuredContent).toMatchObject({
         books: [],
         effectiveCriteria: { query: '*war*', sort: 'popular', page: 1 },
-        notice: 'No books matched these criteria. Broaden or remove the supplied filters: query.',
+        notice,
+        catalogSource: 'mirror',
+        catalogAsOf: null,
       });
       expect(readBack(contentText(result)).blocks.map((block) => block.text)).toEqual([
         '0 books found (page 1)',
         'Search criteria: {"query":"*war*","sort":"popular","page":1}',
-        'No books matched these criteria. Broaden or remove the supplied filters: query.',
+        notice,
+        'Catalog source: mirror\nCatalog as of: null',
       ]);
     });
   });
@@ -842,6 +949,53 @@ describe('gutenbergSearchBooks — live catalog failures', () => {
     http.restore();
     mockGutendexService.searchBooks.mockReset();
     vi.useRealTimers();
+  });
+
+  it.each([
+    ['author', 'Samuel Clemens'],
+    ['contributor', 'Arthur Rackham'],
+    ['contents', 'red-headed league'],
+    ['media_type', ['Sound']],
+    ['lcc', ['PS']],
+  ])('reports a mirror-only %s filter with recovery and no request', async (filter, value) => {
+    const result = await runToolContract(gutenbergSearchBooks, { [filter]: value });
+    const hint = declared('filter_requires_mirror');
+
+    expect(result.isError).toBe(true);
+    expect(hint).toEqual(expect.any(String));
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'filter_requires_mirror', filter, recovery: { hint } },
+      },
+    });
+    expect(readBack(contentText(result)).text).toContain(`Recovery: ${hint}`);
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('omits blank mirror filters and reports live provenance on both surfaces', async () => {
+    http.route({
+      match: 'https://catalog.test/books/',
+      respond: () => Response.json({ count: 0, next: null, previous: null, results: [] }),
+    });
+    const result = await runToolContract(gutenbergSearchBooks, {
+      author: ' ',
+      contributor: '\n',
+      contents: '',
+      media_type: [],
+      lcc: [' '],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      catalogSource: 'live',
+      catalogAsOf: null,
+      effectiveCriteria: { sort: 'popular', page: 1 },
+    });
+    expect(readBack(contentText(result)).codeSpans).toEqual(['{"sort":"popular","page":1}']);
+    expect(readBack(contentText(result)).text).toContain(
+      'Catalog source: live\nCatalog as of: null',
+    );
+    expect(http.calls).toHaveLength(1);
   });
 
   it.each([

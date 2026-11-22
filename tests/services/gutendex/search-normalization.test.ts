@@ -70,6 +70,24 @@ describe('normalizeSearchParams', () => {
     ]);
   });
 
+  it('normalizes mirror-only criteria without changing the spelling echoed to callers', () => {
+    expect(
+      normalizeSearchParams({
+        author: ' Sa\0muel\n Clemens ',
+        contributor: ' RaCKham\t Arthur ',
+        contents: ' Réd-headed\n   League ',
+        media_type: ['   ', ' Sound '],
+        lcc: [' pS ', '   ', ' PR '],
+      }),
+    ).toMatchObject({
+      author: 'Samuel Clemens',
+      contributor: 'RaCKham Arthur',
+      contents: 'Réd-headed League',
+      media_type: ['Sound'],
+      lcc: ['pS', 'PR'],
+    });
+  });
+
   it.each(['<', '<p', 'a\r\n\t', '\0 \n', '%_'])(
     'bounds normalization CPU over a 64× span of %j',
     (prefix) => {

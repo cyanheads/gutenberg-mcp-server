@@ -30,6 +30,7 @@ import { schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type Book,
+  foldCatalogPhrase,
   foldCatalogText,
   normalizeSearchParams,
   type SearchParams,
@@ -94,6 +95,11 @@ function resumePosition(cursor: string | undefined, archiveStamp: string): numbe
   if (separator === -1 || cursor.slice(0, separator) !== archiveStamp) return 0;
   const position = Number.parseInt(cursor.slice(separator + 1), 10);
   return Number.isSafeInteger(position) && position > 0 ? position : 0;
+}
+
+/** Encode distinct literal search terms for SQLite's json_each. */
+function foldedTerms(text: string): string {
+  return JSON.stringify([...new Set(foldCatalogText(text).split(' '))]);
 }
 
 export class CatalogMirrorService {
@@ -190,28 +196,78 @@ export class CatalogMirrorService {
     const predicates: string[] = [];
     const values: SqlValue[] = [];
     if (params.query) {
-      predicates.push(
-        'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE instr(title_folded, term.value) = 0 AND NOT EXISTS (SELECT 1 FROM json_each(authors_folded) AS author WHERE instr(author.value, term.value) > 0))',
-      );
-      values.push(JSON.stringify([...new Set(foldCatalogText(params.query).split(' '))]));
+      predicates.push(`NOT EXISTS (
+        SELECT 1 FROM json_each(?) AS term
+        WHERE instr(title_folded, term.value) = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(authors_folded) AS author
+            WHERE instr(author.value, term.value) > 0
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(alternatives_folded) AS title
+            WHERE instr(title.value, term.value) > 0
+          )
+      )`);
+      values.push(foldedTerms(params.query));
+    }
+    if (params.author) {
+      predicates.push(`EXISTS (
+        SELECT 1 FROM json_each(authors_folded) AS author
+        WHERE NOT EXISTS (
+          SELECT 1 FROM json_each(?) AS term
+          WHERE instr(author.value, term.value) = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(author_aliases_folded, '$[' || author.key || ']') AS alias
+              WHERE instr(alias.value, term.value) > 0
+            )
+        )
+      )`);
+      values.push(foldedTerms(params.author));
+    }
+    if (params.contributor) {
+      predicates.push(`NOT EXISTS (
+        SELECT 1 FROM json_each(?) AS term
+        WHERE NOT EXISTS (
+          SELECT 1 FROM json_each(contributors_folded) AS contributor
+          WHERE instr(contributor.value, term.value) > 0
+        )
+      )`);
+      values.push(foldedTerms(params.contributor));
+    }
+    if (params.contents) {
+      predicates.push('instr(contents_folded, ?) > 0');
+      values.push(foldCatalogPhrase(params.contents));
     }
     if (params.translator) {
       predicates.push(
         'NOT EXISTS (SELECT 1 FROM json_each(?) AS term WHERE NOT EXISTS (SELECT 1 FROM json_each(translators_folded) AS translator WHERE instr(translator.value, term.value) > 0))',
       );
-      values.push(JSON.stringify([...new Set(foldCatalogText(params.translator).split(' '))]));
+      values.push(foldedTerms(params.translator));
     }
     if (params.topic) {
       predicates.push(
         '(EXISTS (SELECT 1 FROM json_each(subjects_folded) WHERE instr(value, ?) > 0) OR EXISTS (SELECT 1 FROM json_each(bookshelves_folded) WHERE instr(value, ?) > 0))',
       );
-      values.push(foldCatalogText(params.topic), foldCatalogText(params.topic));
+      const topic = foldCatalogText(params.topic);
+      values.push(topic, topic);
     }
     if (params.languages?.length) {
       predicates.push(
         'EXISTS (SELECT 1 FROM json_each(languages) WHERE value IN (SELECT value FROM json_each(?)))',
       );
       values.push(JSON.stringify(params.languages));
+    }
+    if (params.media_type?.length) {
+      predicates.push(
+        'EXISTS (SELECT 1 FROM json_each(?) AS type WHERE media_type = type.value COLLATE NOCASE)',
+      );
+      values.push(JSON.stringify(params.media_type));
+    }
+    if (params.lcc?.length) {
+      predicates.push(
+        'EXISTS (SELECT 1 FROM json_each(lcc) AS code CROSS JOIN json_each(?) AS prefix WHERE instr(lower(code.value), lower(prefix.value)) = 1)',
+      );
+      values.push(JSON.stringify(params.lcc));
     }
     if (params.ids) {
       predicates.push('id IN (SELECT value FROM json_each(?))');

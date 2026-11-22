@@ -26,7 +26,10 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import { bestEffortCache } from '@/services/best-effort-cache.js';
-import { getCatalogMirrorService } from '@/services/catalog-mirror/catalog-mirror-service.js';
+import {
+  type CatalogMirrorService,
+  getCatalogMirrorService,
+} from '@/services/catalog-mirror/catalog-mirror-service.js';
 import { parseBookRdf } from '@/services/catalog-mirror/rdf-book-parser.js';
 import { withUpstreamDeadline } from '@/services/upstream-deadline.js';
 import { isRejection } from '@/services/upstream-rejection.js';
@@ -87,6 +90,29 @@ const CATALOG_UNAVAILABLE = 'catalog_unavailable';
 /** Contract reason the catalog-backed tools declare for a request the catalog refuses. */
 const CATALOG_REJECTED = 'catalog_rejected';
 const CATALOG_TTL_SECONDS = 3600; // 1 hour
+const MIRROR_ONLY_FILTERS = ['author', 'contributor', 'contents', 'media_type', 'lcc'] as const;
+
+type DiscoveryProvenance =
+  | { source: 'mirror' | 'live'; catalogAsOf: string | null }
+  | { source: 'none'; catalogAsOf?: never };
+
+type BookLookup = { book: Book; source: 'mirror' | 'rdf'; catalogAsOf: string | null };
+
+/** Record the last bulk archive checkpoint without failing a catalog answer already read. */
+async function catalogCheckpoint(
+  mirror: CatalogMirrorService,
+  ctx: Context,
+): Promise<string | null> {
+  try {
+    const status = await mirror.status();
+    ctx.signal.throwIfAborted();
+    return status.checkpoint ?? null;
+  } catch {
+    ctx.signal.throwIfAborted();
+    ctx.log.debug('Catalog mirror checkpoint unavailable');
+    return null;
+  }
+}
 
 /** One catalog document: where it lives, how its body reads, and what its 404 means. */
 interface CatalogRequest<T> {
@@ -182,7 +208,11 @@ function normalizeBook(raw: RawBook): Book {
   return {
     id: raw.id,
     title: normalizeTitle(raw.title),
-    authors: raw.authors.map(normalizePerson),
+    authors: raw.authors.map((person) => ({
+      ...normalizePerson(person),
+      aliases: null,
+      webpage: null,
+    })),
     translators: raw.translators.map(normalizePerson),
     editors: raw.editors?.map(normalizePerson) ?? [],
     subjects: raw.subjects,
@@ -202,6 +232,13 @@ function normalizeBook(raw: RawBook): Book {
     has_plain_text: hasPlainText(raw),
     is_readable: isReadable(raw),
     source_notes: null,
+    alternative_titles: null,
+    contributors: null,
+    contents: null,
+    release_date: null,
+    reading_ease: null,
+    source_imprint: null,
+    lcc: null,
   };
 }
 
@@ -298,13 +335,9 @@ export class GutendexService {
   async searchBooks(
     params: SearchParams,
     ctx: Context,
-  ): Promise<{
-    books: Book[];
-    totalCount: number;
-    hasMore: boolean;
-    page: number;
-    source: 'mirror' | 'live' | 'none';
-  }> {
+  ): Promise<
+    { books: Book[]; totalCount: number; hasMore: boolean; page: number } & DiscoveryProvenance
+  > {
     ctx.signal.throwIfAborted();
     params = normalizeSearchParams(params);
     const pageNumber = params.page ?? 1;
@@ -313,17 +346,19 @@ export class GutendexService {
     const mirrored = await this.mirrorSearch(params, ctx);
     ctx.signal.throwIfAborted();
     if (mirrored !== null) {
-      if (pageNumber > 1 && (pageNumber - 1) * 32 >= mirrored.total) {
+      const { mirror, result } = mirrored;
+      if (pageNumber > 1 && (pageNumber - 1) * 32 >= result.total) {
         throw notFound('The requested page is beyond the available result range.', {
           reason: 'page_out_of_range',
         });
       }
       return {
-        books: mirrored.books,
-        totalCount: mirrored.total,
-        hasMore: pageNumber * 32 < mirrored.total,
+        books: result.books,
+        totalCount: result.total,
+        hasMore: pageNumber * 32 < result.total,
         page: pageNumber,
         source: 'mirror',
+        catalogAsOf: await catalogCheckpoint(mirror, ctx),
       };
     }
     if (params.translator) {
@@ -338,6 +373,14 @@ export class GutendexService {
         ...ctx.recoveryFor('query_requires_mirror'),
       });
     }
+    const filter = MIRROR_ONLY_FILTERS.find((field) => params[field] !== undefined);
+    if (filter) {
+      throw validationError(`The ${filter} filter requires the local catalog mirror.`, {
+        reason: 'filter_requires_mirror',
+        filter,
+        ...ctx.recoveryFor('filter_requires_mirror'),
+      });
+    }
     const page = await this.fetchPage(params, ctx);
     const books = page.results.map(normalizeBook);
     return {
@@ -346,6 +389,7 @@ export class GutendexService {
       hasMore: page.next !== null,
       page: pageNumber,
       source: 'live',
+      catalogAsOf: null,
     };
   }
 
@@ -355,7 +399,7 @@ export class GutendexService {
       const mirror = getCatalogMirrorService();
       if (!(await mirror.ready())) return null;
       ctx.signal.throwIfAborted();
-      return await mirror.searchBooks(params);
+      return { mirror, result: await mirror.searchBooks(params) };
     } catch (err: unknown) {
       if (ctx.signal.aborted) throw err;
       ctx.log.debug('Catalog mirror unavailable; falling back to the live catalog');
@@ -376,12 +420,12 @@ export class GutendexService {
    * availability optimization layered under a working upstream path; a corrupt
    * database or a missing file should cost latency, never correctness.
    */
-  private async mirrorBook(id: number, ctx: Context): Promise<Book | null> {
+  private async mirrorBook(id: number, ctx: Context) {
     try {
       const mirror = getCatalogMirrorService();
       if (!(await mirror.ready())) return null;
       const [book] = await mirror.getBooks([id]);
-      return book ?? null;
+      return book ? { book, mirror } : null;
     } catch (err: unknown) {
       ctx.log.debug("Catalog mirror unavailable; falling back to the book's RDF record", {
         id,
@@ -403,18 +447,37 @@ export class GutendexService {
    *   the lookup takes at most the catalog budget out of it.
    */
   async getBook(id: number, ctx: Context, deadlineAtMs?: number): Promise<Book> {
+    return (await this.lookupBook(id, ctx, false, deadlineAtMs)).book;
+  }
+
+  /** Fetch a detail record and identify its catalog source. */
+  getBookWithProvenance(id: number, ctx: Context): Promise<BookLookup> {
+    return this.lookupBook(id, ctx, true);
+  }
+
+  private async lookupBook(
+    id: number,
+    ctx: Context,
+    includeCheckpoint: boolean,
+    deadlineAtMs?: number,
+  ): Promise<BookLookup> {
     const mirrored = await this.mirrorBook(id, ctx);
     if (mirrored !== null) {
       ctx.log.debug('Catalog mirror hit', { id });
-      return mirrored;
+      const { book, mirror } = mirrored;
+      return {
+        book,
+        source: 'mirror',
+        catalogAsOf: includeCheckpoint ? await catalogCheckpoint(mirror, ctx) : null,
+      };
     }
 
-    /** The parsed record; the retired `gutendex/book/<id>` key held a Gutendex payload. */
-    const cacheKey = `gutenberg/book/v1/${id}`;
+    /** Parsed RDF with the current catalog fields; v1 entries lack these fields. */
+    const cacheKey = `gutenberg/book/v2/${id}`;
     const cached = await ctx.state.get<Book>(cacheKey);
     if (cached) {
       ctx.log.debug('Book cache hit', { id });
-      return cached;
+      return { book: cached, source: 'rdf', catalogAsOf: null };
     }
 
     const budgetMs =
@@ -444,7 +507,7 @@ export class GutendexService {
     );
 
     await bestEffortCache(ctx, cacheKey, book, CATALOG_TTL_SECONDS);
-    return book;
+    return { book, source: 'rdf', catalogAsOf: null };
   }
 }
 

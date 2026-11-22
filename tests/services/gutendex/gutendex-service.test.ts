@@ -945,21 +945,27 @@ describe('GutendexService — per-book RDF lookup', () => {
     expect(await service.getBook(84, ctx)).toEqual(first);
     expect(http.calls).toHaveLength(1);
     // The entry is the parsed record, not the RDF document it came from.
-    expect(await ctx.state.get('gutenberg/book/v1/84')).toEqual(first);
+    expect(await ctx.state.get('gutenberg/book/v2/84')).toEqual(first);
 
     vi.setSystemTime(new Date('2026-11-11T01:00:01Z'));
     await service.getBook(84, ctx);
     expect(http.calls).toHaveLength(2);
   });
 
-  it('ignores a Gutendex record cached under the retired key', async () => {
+  it('ignores catalog records cached under retired keys', async () => {
     http.route({ match: rdfUrl(84), respond: () => new Response(readRdf(84)) });
     const ctx = createMockContext();
     await ctx.state.set('gutendex/book/84', { ...rawBook, id: 84, title: 'Stale Gutendex shape' });
+    await ctx.state.set('gutenberg/book/v1/84', { id: 84, title: 'Stale RDF shape' });
 
     const book = await makeService().getBook(84, ctx);
 
     expect(book.title).toBe(FRANKENSTEIN);
+    expect(book).toMatchObject({
+      id: 84,
+      lcc: expect.any(Array),
+      release_date: expect.any(String),
+    });
     expect(http.calls).toHaveLength(1);
   });
 });

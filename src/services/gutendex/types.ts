@@ -43,10 +43,24 @@ export interface Person {
   name: string;
 }
 
+/** Creator credit with authority metadata inspected from RDF or unavailable. */
+export interface Author extends Person {
+  aliases: string[] | null;
+  webpage: string | null;
+}
+
+/** An RDF agent credit outside the dedicated editor and translator lists. */
+export interface Contributor extends Person {
+  role: string;
+}
+
 /** Normalized book record with computed fields. */
 export interface Book {
-  authors: Person[];
+  alternative_titles: string[] | null;
+  authors: Author[];
   bookshelves: string[];
+  contents: string | null;
+  contributors: Contributor[] | null;
   copyright: boolean | null;
   download_count: number;
   editors: Person[];
@@ -57,7 +71,11 @@ export interface Book {
   /** Eligible Text record formats; does not guarantee the mirror file exists. */
   is_readable: boolean;
   languages: string[];
+  lcc: string[] | null;
   media_type: string;
+  reading_ease: string | null;
+  release_date: string | null;
+  source_imprint: string | null;
   /** Direct RDF bibliographic notes; null when the source did not supply them. */
   source_notes: string[] | null;
   subjects: string[];
@@ -71,11 +89,21 @@ export interface Book {
 
 /** Parameters for a Gutendex book search. */
 export interface SearchParams {
+  /** Mirror-only: each word matches one creator's name or aliases. */
+  author?: string | undefined;
   author_year_end?: number | undefined;
   author_year_start?: number | undefined;
+  /** Mirror-only: folded literal substring of catalog contents. */
+  contents?: string | undefined;
+  /** Mirror-only: all words match contributor names. */
+  contributor?: string | undefined;
   copyright?: ('true' | 'false' | 'null')[] | undefined;
   ids?: number[] | undefined;
   languages?: string[] | undefined;
+  /** Mirror-only: literal Library of Congress Classification prefixes. */
+  lcc?: string[] | undefined;
+  /** Mirror-only: exact catalog media type values. */
+  media_type?: string[] | undefined;
   mime_type?: string | undefined;
   page?: number | undefined;
   query?: string | undefined;
@@ -159,6 +187,17 @@ function normalizeWords(value: string | undefined): string | undefined {
   );
 }
 
+/** Fold a catalog phrase and collapse whitespace for literal phrase matching. */
+export function foldCatalogPhrase(value: string): string {
+  return foldCatalogText(value.replaceAll('\0', '')).replace(/\s+/gu, ' ').trim();
+}
+
+/** Trim controlled catalog values while preserving their spelling in echoed criteria. */
+function normalizeSelection(values: string[] | undefined): string[] | undefined {
+  const selected = values?.map((value) => value.trim()).filter(Boolean);
+  return selected?.length ? selected : undefined;
+}
+
 /**
  * A language code in lowercase. `İ` lowercases to two units, which can outgrow the
  * echoed criteria's length cap, so such a code stays as sent and matches nothing.
@@ -183,10 +222,15 @@ export function normalizeSearchParams(params: SearchParams): SearchParams {
   const topic = params.topic?.trim();
   return {
     ...params,
+    author: normalizeWords(params.author),
+    contributor: normalizeWords(params.contributor),
+    contents: normalizeWords(params.contents),
     query: normalizeWords(params.query),
     translator: normalizeWords(params.translator),
     topic: topic && foldCatalogText(topic).trim() ? topic : undefined,
     languages: params.languages?.length ? params.languages.map(lowercaseCode) : undefined,
+    lcc: normalizeSelection(params.lcc),
+    media_type: normalizeSelection(params.media_type),
     mime_type: normalizeMimePrefix(params.mime_type),
     copyright: params.copyright?.length ? params.copyright : undefined,
     sort: params.sort ?? 'popular',

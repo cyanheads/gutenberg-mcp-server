@@ -19,7 +19,7 @@ import {
   createMockContext,
   type FetchMockHarness,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
@@ -87,6 +87,28 @@ afterEach(async () => {
 });
 
 describe('GutendexService.getBook — catalog mirror read path', () => {
+  it('reads the checkpoint for detail but leaves the reading path independent of it', async () => {
+    const status = vi.spyOn(mirror, 'status');
+    const service = makeGutendex();
+    const ctx = createMockContext();
+
+    await expect(service.getBook(84, ctx)).resolves.toMatchObject({ id: 84 });
+    expect(status).not.toHaveBeenCalled();
+    await expect(service.getBookWithProvenance(84, ctx)).resolves.toMatchObject({
+      book: { id: 84 },
+      source: 'mirror',
+      catalogAsOf: ARCHIVE_BUILD.toISOString(),
+    });
+    expect(status).toHaveBeenCalledOnce();
+    status.mockRejectedValueOnce(new Error('checkpoint unavailable'));
+    await expect(service.getBookWithProvenance(84, ctx)).resolves.toMatchObject({
+      book: { id: 84 },
+      source: 'mirror',
+      catalogAsOf: null,
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+
   it('serves a mirrored book without calling the live catalog', async () => {
     /** No route registered: any upstream call fails the strict harness. */
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
@@ -106,9 +128,15 @@ describe('GutendexService.getBook — catalog mirror read path', () => {
     });
     const ctx = createMockContext({ errors: gutenbergGetBook.errors });
 
-    const book = await makeGutendex().getBook(UNMIRRORED_ID, ctx);
+    const service = makeGutendex();
+    const detail = await service.getBookWithProvenance(UNMIRRORED_ID, ctx);
 
-    expect(book).toMatchObject({ id: UNMIRRORED_ID, title: 'Mothers still', source_notes: [] });
+    expect(detail).toMatchObject({
+      book: { id: UNMIRRORED_ID, title: 'Mothers still', source_notes: [] },
+      source: 'rdf',
+      catalogAsOf: null,
+    });
+    await expect(service.getBookWithProvenance(UNMIRRORED_ID, ctx)).resolves.toEqual(detail);
     expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(UNMIRRORED_ID)]);
   });
 

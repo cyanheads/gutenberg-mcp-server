@@ -12,6 +12,18 @@ export const LANGUAGE_CODE_MESSAGE =
 
 /** Filters shared by search, browse, criteria echo and continuation arguments. */
 export const discoveryFilters = {
+  media_type: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Any listed catalog media type, matched exactly ignoring case. Examples: ["Text"], ["Sound"]. Requires the local mirror.',
+    ),
+  lcc: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Any listed Library of Congress Classification prefix, ignoring case. Example: ["PS", "PR"]. Requires the local mirror.',
+    ),
   languages: z
     .array(z.string().min(2).max(3, LANGUAGE_CODE_MESSAGE))
     .optional()
@@ -36,14 +48,37 @@ export const discoveryFilters = {
     ),
 };
 
+/** Search-only filters shared by input and normalized search criteria. */
+export const mirrorSearchFilters = {
+  author: z
+    .string()
+    .optional()
+    .describe(
+      'Every word must match one creator’s name or aliases, ignoring case and accents. Requires the local mirror.',
+    ),
+  contributor: z
+    .string()
+    .optional()
+    .describe(
+      'Every word must match a contributor name, ignoring case and accents. Requires the local mirror.',
+    ),
+  contents: z
+    .string()
+    .optional()
+    .describe(
+      'Literal phrase in the catalog table of contents, ignoring case, accents and whitespace runs. Requires the local mirror.',
+    ),
+};
+
 /** Effective catalog search arguments, including defaults. */
 export const discoveryCriteria = z.object({
   ...discoveryFilters,
+  ...mirrorSearchFilters,
   query: z
     .string()
     .optional()
     .describe(
-      'Every nonblank word must occur in the title or an author name as a literal substring. The local mirror ignores case and accents; live matching is upstream-defined. More than four words require the local mirror. Whitespace separates words.',
+      'Every nonblank word must occur in the title or an author name as a literal substring. The local mirror also searches alternative titles and ignores case and accents. Live matching is upstream-defined. More than four words require the local mirror.',
     ),
   translator: z
     .string()
@@ -105,10 +140,15 @@ export async function discoveryNotice(
   if (result.books.length === 0) {
     const filterKeys = [
       'query',
+      'author',
+      'contributor',
+      'contents',
       'topic',
       'translator',
       'languages',
       'mime_type',
+      'media_type',
+      'lcc',
       'copyright',
       'author_year_start',
       'author_year_end',
@@ -122,6 +162,8 @@ export async function discoveryNotice(
       notices.push(
         'MIME filters match prefixes such as "application/pdf" or "text/plain", not file extensions.',
       );
+    if (result.source === 'mirror' && criteria.query && !criteria.author)
+      notices.push('If you are searching for a creator by an alias, use the author filter.');
     const codes = criteria.languages?.filter((code) => code.length === 3);
     if (
       codes?.length &&

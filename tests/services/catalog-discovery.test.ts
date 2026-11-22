@@ -11,6 +11,7 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergBrowsePopular } from '@/mcp-server/tools/definitions/gutenberg-browse-popular.tool.js';
+import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
 import { gutenbergSearchBooks } from '@/mcp-server/tools/definitions/gutenberg-search-books.tool.js';
 import {
   type CatalogMirrorService,
@@ -18,8 +19,8 @@ import {
 } from '@/services/catalog-mirror/catalog-mirror-service.js';
 import { rowFromBook } from '@/services/catalog-mirror/catalog-mirror-store.js';
 import { getGutendexService, initGutendexService } from '@/services/gutendex/gutendex-service.js';
-import type { Book, Person } from '@/services/gutendex/types.js';
-import { contentText } from '../tools/markdown-read-back.js';
+import type { Author, Book, SearchParams } from '@/services/gutendex/types.js';
+import { contentText, readBack } from '../tools/markdown-read-back.js';
 
 const config = {
   gutendexBaseUrl: 'https://catalog.test/books/',
@@ -29,7 +30,7 @@ const config = {
 const fixture = (id: number, overrides: Partial<Book> = {}): Book => ({
   id,
   title: 'Éléphant % _ modern tale two',
-  authors: [{ name: 'Ångström, Émile', birth_year: null, death_year: 1900 }],
+  authors: [person('Ångström, Émile', null, 1900)],
   translators: [],
   editors: [],
   subjects: ['ÉTUDES -- Fiction'],
@@ -41,15 +42,24 @@ const fixture = (id: number, overrides: Partial<Book> = {}): Book => ({
   summaries: [],
   summary: null,
   source_notes: null,
+  alternative_titles: null,
+  contributors: null,
+  contents: null,
+  release_date: null,
+  reading_ease: null,
+  source_imprint: null,
+  lcc: null,
   formats: { 'text/plain; charset=utf-8': 'https://mirror.test/book.txt' },
   has_plain_text: true,
   is_readable: true,
   ...overrides,
 });
-const person = (name: string, birth_year: number | null, death_year: number | null): Person => ({
+const person = (name: string, birth_year: number | null, death_year: number | null): Author => ({
   name,
   birth_year,
   death_year,
+  aliases: null,
+  webpage: null,
 });
 type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
 const bookIds = (result: ToolResult) =>
@@ -129,6 +139,201 @@ afterEach(async () => {
 });
 
 describe('complete mirror discovery', () => {
+  it('uses only the durable archive checkpoint for mirror provenance', async () => {
+    const service = getGutendexService();
+    const ctx = createMockContext();
+    const checkpoint = '2026-08-21T14:40:50.000Z';
+    await expect(service.searchBooks({ ids: [1] }, ctx)).resolves.toMatchObject({
+      source: 'mirror',
+      catalogAsOf: null,
+    });
+    await mirror.mirror.store.writeState({
+      status: 'complete',
+      completedAt: '2026-08-22T00:00:00.000Z',
+      checkpoint,
+      total: 70,
+    });
+    await expect(service.searchBooks({ ids: [1] }, ctx)).resolves.toMatchObject({
+      source: 'mirror',
+      catalogAsOf: checkpoint,
+    });
+    const status = vi.spyOn(mirror, 'status').mockRejectedValue(new Error('status unavailable'));
+    await expect(service.searchBooks({ ids: [1] }, ctx)).resolves.toMatchObject({
+      books: [expect.objectContaining({ id: 1 })],
+      source: 'mirror',
+      catalogAsOf: null,
+    });
+    expect(status).toHaveBeenCalledOnce();
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it.each(['resolves', 'rejects'])(
+    'preserves caller cancellation when the checkpoint read %s',
+    async (outcome) => {
+      const controller = new AbortController();
+      const reason = new Error('Caller cancelled');
+      const status = await mirror.status();
+      vi.spyOn(mirror, 'status').mockImplementationOnce(async () => {
+        controller.abort(reason);
+        if (outcome === 'rejects') throw new Error('Mirror unavailable');
+        return status;
+      });
+      const ctx = createMockContext({ signal: controller.signal });
+      await expect(getGutendexService().searchBooks({ ids: [1] }, ctx)).rejects.toBe(reason);
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it('keeps aliases on their named creator and alternatives in ordinary query only', async () => {
+    await seed([
+      fixture(76, {
+        authors: [{ ...person('Twain, Mark', 1835, 1910), aliases: ['Clemens, Samuel'] }],
+      }),
+      fixture(77, { authors: [person('Samuel', null, null), person('Clemens', null, null)] }),
+      fixture(78, {
+        authors: [
+          person('Mark', null, null),
+          { ...person('Twain', null, null), aliases: ['Clemens, Samuel'] },
+        ],
+      }),
+      fixture(11, {
+        authors: [{ ...person('Carroll, Lewis', 1832, 1898), aliases: ['Dodgson, Charles'] }],
+      }),
+      fixture(28885, { authors: [person('Carroll, Lewis', 1832, 1898)] }),
+      fixture(1184, {
+        title: 'The Count of Monte Cristo',
+        alternative_titles: ['Le comte de Monte-Cristo. English'],
+      }),
+    ]);
+    const cases: [SearchParams, number[]][] = [
+      [{ author: 'Samuel Clemens', ids: [76, 77] }, [76]],
+      [{ author: 'Mark Samuel', ids: [76, 77, 78] }, [76]],
+      [{ author: 'Dodgson', ids: [11, 28885] }, [11]],
+      [{ author: 'Carroll', ids: [11, 28885] }, [11, 28885]],
+      [{ query: 'Samuel Clemens', ids: [76] }, []],
+      [{ query: 'comte monte cristo', ids: [1184] }, [1184]],
+      [{ author: 'comte', ids: [1184] }, []],
+    ];
+    for (const [params, ids] of cases) {
+      const result = await mirror.searchBooks(params);
+      expect(result.books.map((book) => book.id)).toEqual(ids);
+      expect(result.total).toBe(ids.length);
+    }
+  });
+
+  it('filters catalog credits and contents literally across null and populated rows', async () => {
+    const contents = 'A ré d-headed league\nSPECKLED  Band % _';
+    await seed([
+      fixture(1661, {
+        contents,
+        contributors: [
+          { name: 'Rackham, Arthur', birth_year: 1867, death_year: 1939, role: 'Illustrator' },
+        ],
+      }),
+      fixture(1662, { contents: 'Speckled Band xy', contributors: [] }),
+    ]);
+    const detail = await runToolContract(gutenbergGetBook, { id: 1661 });
+    expect(detail.structuredContent).toMatchObject({ contents });
+    expect(readBack(contentText(detail)).blocks).toContainEqual({
+      kind: 'code',
+      container: undefined,
+      text: contents,
+    });
+    const cases: [SearchParams, number[]][] = [
+      [{ contents: ' league  speckled\n band ', ids: [1661, 1662, 1] }, [1661]],
+      [{ contents: 're d-headed league', ids: [1661, 1662, 1] }, [1661]],
+      [{ contents: 'Band % _', ids: [1661, 1662, 1] }, [1661]],
+      [{ contents: 'Band _', ids: [1661, 1662, 1] }, []],
+      [{ contributor: 'Arthur RACKHAM', ids: [1661, 1662, 1] }, [1661]],
+      [{ contributor: '%', ids: [1661, 1662, 1] }, []],
+    ];
+    for (const [params, ids] of cases) {
+      expect((await mirror.searchBooks(params)).books.map((book) => book.id)).toEqual(ids);
+    }
+  });
+
+  it('pages media-type and LCC matches using the same exact and prefix filters as totals', async () => {
+    await seed(
+      Array.from({ length: 35 }, (_, i) =>
+        fixture(800 + i, { media_type: 'Sound', lcc: [i % 2 ? 'PS' : 'PR123'] }),
+      ).concat([
+        fixture(900, { media_type: 'Text', lcc: ['PS'] }),
+        fixture(901, { media_type: 'Sound', lcc: [] }),
+        fixture(902, { media_type: 'StillImage', lcc: ['PZ'] }),
+      ]),
+    );
+    const service = getGutendexService();
+    const ctx = createMockContext();
+    const filters = { media_type: [' sound '], lcc: ['pr1', 'ps'] };
+    const first = await service.searchBooks(filters, ctx);
+    const second = await service.searchBooks({ ...filters, page: 2 }, ctx);
+    expect(first).toMatchObject({ totalCount: 35, hasMore: true });
+    expect(second).toMatchObject({ totalCount: 35, hasMore: false });
+    expect(first.books.concat(second.books).map((book) => book.id)).toEqual(
+      Array.from({ length: 35 }, (_, i) => 800 + i),
+    );
+    await expect(service.searchBooks({ ...filters, page: 3 }, ctx)).rejects.toMatchObject({
+      data: { reason: 'page_out_of_range' },
+    });
+    const criteria: [SearchParams, number][] = [
+      [{ media_type: ['Sound', 'StillImage'] }, 37],
+      [{ media_type: ['Sou'] }, 0],
+      [{ media_type: ['other'] }, 0],
+      [{ lcc: ['P'] }, 37],
+      [{ lcc: ['r1'] }, 0],
+      [{ lcc: ['P%'] }, 0],
+      [{ lcc: ['P_'] }, 0],
+    ];
+    for (const [params, total] of criteria) {
+      expect((await mirror.searchBooks(params)).total).toBe(total);
+    }
+  });
+
+  it.each(decliningMirrors)(
+    'reports active local filters before live I/O on a %s mirror',
+    async (_label, decline) => {
+      decline();
+      const ctx = createMockContext({ errors: gutenbergSearchBooks.errors });
+      const service = getGutendexService();
+      const active = {
+        author: 'Twain',
+        contributor: 'Rackham',
+        contents: 'league',
+        media_type: ['Sound'],
+        lcc: ['PS'],
+      };
+      for (const filter of Object.keys(active) as (keyof typeof active)[]) {
+        await expect(service.searchBooks({ [filter]: active[filter] }, ctx)).rejects.toMatchObject({
+          data: { reason: 'filter_requires_mirror', filter },
+        });
+      }
+      await expect(service.searchBooks({ ...active, ids: [] }, ctx)).resolves.toEqual({
+        books: [],
+        page: 1,
+        hasMore: false,
+        totalCount: 0,
+        source: 'none',
+      });
+      expect(http.calls).toHaveLength(0);
+      answerLive([liveRecord]);
+      const blank = {
+        author: '\u0301',
+        contributor: ' ',
+        contents: ' \n',
+        media_type: [' '],
+        lcc: [],
+      };
+      for (let call = 0; call < 2; call++) {
+        await expect(service.searchBooks(blank, ctx)).resolves.toMatchObject({
+          books: [expect.objectContaining({ lcc: null })],
+          source: 'live',
+          catalogAsOf: null,
+        });
+      }
+      expect(http.calls.map(({ request }) => request.url)).toEqual([config.gutendexBaseUrl]);
+    },
+  );
+
   it('folds accents and mapped letters consistently through real mirror discovery', async () => {
     const marked = 'Æ Œ Ø ß Ł Ð Þ É Σς';
     const plain = 'ae oe o ss l d th e σσ';
@@ -246,7 +451,7 @@ describe('complete mirror discovery', () => {
         rowFromBook(
           fixture(71, {
             title: 'ΟΣΑ',
-            authors: [{ name: 'ΟΣΑ', birth_year: null, death_year: null }],
+            authors: [person('ΟΣΑ', null, null)],
             subjects: ['ΟΣΑ'],
             bookshelves: ['ΟΣΑ'],
           }),

@@ -10,6 +10,13 @@ import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getGutendexService } from '@/services/gutendex/gutendex-service.js';
 import { normalizeSearchParams } from '@/services/gutendex/types.js';
 import {
+  catalogAsOfSchema,
+  catalogProvenanceTrailer,
+  discoveryAuthors,
+  lccSchema,
+  renderCatalogList,
+} from '../catalog-output.js';
+import {
   discoveryCriteria,
   discoveryFilters,
   discoveryNotice,
@@ -19,10 +26,12 @@ import {
 export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   title: 'Browse Popular Gutenberg Books',
   description:
-    'Browse Project Gutenberg books ordered by downloads in the last 30 days at the source snapshot. Returns up to 32 titles with IDs, authors, languages, download counts, and is_readable. Filter by language, topic, MIME prefix or copyright status. Empty matches succeed with criteria and a notice; truncated results include executable search continuation. Use this for discovery — "what are the most popular classics in French?".',
+    'Browse up to 32 Project Gutenberg books by downloads in the last 30 days at the source snapshot. Filter by language, topic, MIME prefix, copyright status, media type or Library of Congress Classification. Media type and classification filters require the local mirror. Truncated results include executable search continuation.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
+    media_type: discoveryFilters.media_type,
+    lcc: discoveryFilters.lcc,
     mime_type: discoveryFilters.mime_type,
     copyright: discoveryFilters.copyright,
     languages: z
@@ -71,6 +80,8 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
               )
               .describe('Author(s).'),
             languages: z.array(z.string()).describe('Language codes.'),
+            media_type: z.string().describe('Catalog media type, such as "Text" or "Sound".'),
+            lcc: lccSchema,
             download_count: z
               .number()
               .describe(
@@ -100,6 +111,8 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
   }),
 
   enrichment: {
+    catalogSource: z.enum(['mirror', 'live']).describe('Catalog that answered.'),
+    catalogAsOf: catalogAsOfSchema,
     effectiveCriteria: discoveryCriteria.describe(
       'Normalized browse criteria, including popular sort and first page.',
     ),
@@ -128,6 +141,7 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
 
   /** Render criteria and executable continuation alongside the cap disclosure. */
   enrichmentTrailer: {
+    ...catalogProvenanceTrailer,
     effectiveCriteria: {
       render: (value) =>
         markdown().text('Browse criteria: ').inlineCode(JSON.stringify(value)).build(),
@@ -165,12 +179,19 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
         value === undefined
           ? ''
           : `The least-popular book shown has ${value.toLocaleString()} downloads in the last 30 days (source snapshot); omitted books have at most this count. ` +
-            'To page through the full result set, call gutenberg_search_books with the same language/topic ' +
-            'filters plus any MIME/copyright filters, sort="popular", starting at the continuation page above.',
+            'To page through the full result set, use the gutenberg_search_books continuation above.',
     },
   },
 
   errors: [
+    {
+      reason: 'filter_requires_mirror',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A media type or LCC filter was supplied while the local mirror could not answer.',
+      recovery:
+        'Remove the filter named in the error, or ask the server operator to initialize or repair the local catalog mirror.',
+      thrownBy: 'service',
+    },
     {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -197,6 +218,8 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       topic: input.topic,
       mime_type: input.mime_type,
       copyright: input.copyright,
+      media_type: input.media_type,
+      lcc: input.lcc,
       sort: 'popular',
       page: 1,
     });
@@ -208,6 +231,8 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
     });
 
     const result = await getGutendexService().searchBooks(criteria, ctx);
+    if (result.source === 'mirror' || result.source === 'live')
+      ctx.enrich({ catalogSource: result.source, catalogAsOf: result.catalogAsOf });
 
     const notice = await discoveryNotice(criteria, result, ctx);
 
@@ -253,8 +278,10 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       books: limited.map((b) => ({
         id: b.id,
         title: b.title,
-        authors: b.authors,
+        authors: discoveryAuthors(b.authors),
         languages: b.languages,
+        media_type: b.media_type,
+        lcc: b.lcc,
         download_count: b.download_count,
         has_plain_text: b.has_plain_text,
         is_readable: b.is_readable,
@@ -290,6 +317,9 @@ export const gutenbergBrowsePopular = tool('gutenberg_browse_popular', {
       lines.push(`${idx + 1}. **[${book.id}]** ${escapeMarkdownInline(book.title)} — ${authorStr}`);
       lines.push(
         `   Lang: ${book.languages.map(escapeMarkdownInline).join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: ${book.has_plain_text ? 'Yes' : 'No'} | Readable: ${book.is_readable ? 'Yes' : 'No'}`,
+      );
+      lines.push(
+        `   Media: ${escapeMarkdownInline(book.media_type)} | LCC: ${renderCatalogList(book.lcc)}`,
       );
     });
 

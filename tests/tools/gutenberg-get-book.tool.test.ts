@@ -17,6 +17,7 @@ import {
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gutenbergGetBook } from '@/mcp-server/tools/definitions/gutenberg-get-book.tool.js';
+import type { Book } from '@/services/gutendex/types.js';
 import {
   ACTIVE_MARKDOWN,
   contentText,
@@ -34,12 +35,33 @@ vi.mock('@/services/gutendex/gutendex-service.js', () => ({
 const mockGutendexService = {
   searchBooks: vi.fn(),
   getBook: vi.fn(),
+  getBookWithProvenance: vi.fn(
+    async (
+      id: number,
+      ctx: Context,
+    ): Promise<{ book: Book; source: 'mirror' | 'rdf'; catalogAsOf: string | null }> => ({
+      book: await mockGutendexService.getBook(id, ctx),
+      source: 'mirror',
+      catalogAsOf: null,
+    }),
+  ),
 };
 
+const authorExtras = { aliases: null, webpage: null };
+const extraMetadata = {
+  alternative_titles: null,
+  contributors: null,
+  contents: null,
+  release_date: null,
+  source_imprint: null,
+  reading_ease: null,
+  lcc: null,
+};
 const mockBook = {
+  ...extraMetadata,
   id: 1342,
   title: 'Pride and Prejudice',
-  authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+  authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817, ...authorExtras }],
   translators: [],
   editors: [],
   subjects: ['England -- Social life and customs -- 19th century -- Fiction'],
@@ -65,6 +87,82 @@ beforeEach(() => {
 });
 
 describe('gutenbergGetBook', () => {
+  it('reads new edition metadata and credited creators back through both surfaces', async () => {
+    const contents = '  First item\r\n```\r\n  Last item  \r';
+    const webpage = 'https://en.wikipedia.org/wiki/Author_(example)';
+    const values = {
+      authors: [
+        { ...mockBook.authors[0]!, aliases: [ACTIVE_MARKDOWN, 'Second alias'], webpage },
+        { name: 'Second creator', birth_year: null, death_year: 1800, aliases: [], webpage: null },
+      ],
+      alternative_titles: [ACTIVE_MARKDOWN, 'Variant title'],
+      contributors: [
+        { name: ACTIVE_MARKDOWN, role: 'Illustrator', birth_year: 1800, death_year: null },
+        { name: 'Second credit', role: 'Unknown_role', birth_year: null, death_year: 1870 },
+      ],
+      release_date: '1993-10-01',
+      source_imprint: `London: Publisher, 1818. ${ACTIVE_MARKDOWN}`,
+      reading_ease: 'Reading ease score: 65.0 (8th & 9th grade).',
+      lcc: ['PR', 'PS'],
+      contents,
+    };
+    mockGutendexService.getBookWithProvenance.mockResolvedValueOnce({
+      book: { ...mockBook, ...values },
+      source: 'mirror',
+      catalogAsOf: '2026-11-15T15:40:13.000Z',
+    });
+
+    const result = await runToolContract(gutenbergGetBook, { id: 84 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      ...values,
+      catalogSource: 'mirror',
+      catalogAsOf: '2026-11-15T15:40:13.000Z',
+    });
+    const read = readBack(contentText(result));
+    expect(read.links).toContainEqual({ href: webpage, label: webpage });
+    expect(read.blocks).toContainEqual({ container: undefined, kind: 'code', text: lf(contents) });
+    for (const value of [
+      `Author 1 aliases: ${ACTIVE_MARKDOWN}; Second alias | Webpage: ${webpage}`,
+      'Author 2 aliases: None | Webpage: Not available',
+      `Alternative titles: ${ACTIVE_MARKDOWN}; Variant title`,
+      `${ACTIVE_MARKDOWN} (1800–?) | Role: Illustrator`,
+      'Second credit (?–1870) | Role: Unknown_role',
+      'Release date: 1993-10-01',
+      `Source imprint: ${values.source_imprint}`,
+      `Reading ease: ${values.reading_ease}`,
+      'LCC: PR; PS',
+      'Catalog source: mirror\nCatalog as of: 2026-11-15T15:40:13.000Z',
+    ])
+      expect(read.text).toContain(value);
+  });
+
+  it.each([null, []])('preserves missing or empty edition lists (%j)', async (list) => {
+    mockGutendexService.getBook.mockResolvedValue({
+      ...mockBook,
+      lcc: list,
+      alternative_titles: list,
+      contributors: list,
+      authors: [{ ...mockBook.authors[0]!, aliases: list }],
+    });
+    const result = await runToolContract(gutenbergGetBook, { id: 84 });
+    expect(result.structuredContent).toMatchObject({
+      lcc: list,
+      alternative_titles: list,
+      contributors: list,
+      authors: [{ aliases: list, webpage: null }],
+      release_date: null,
+      source_imprint: null,
+      reading_ease: null,
+      contents: null,
+    });
+    const text = readBack(contentText(result)).text;
+    for (const label of ['LCC', 'Alternative titles', 'Contributors', 'Author 1 aliases'])
+      expect(text).toContain(`${label}: ${list === null ? 'Not available' : 'None'}`);
+    for (const label of ['Release date', 'Source imprint', 'Reading ease', 'Contents'])
+      expect(text).toContain(`${label}: Not available`);
+  });
+
   it.each([null, [], ['See #41445 (1818 ed.) and #42324 (1831 ed.).']])(
     'preserves source notes %j on both surfaces',
     async (source_notes) => {
@@ -185,7 +283,7 @@ describe('gutenbergGetBook', () => {
       ...mockBook,
       id: 2600,
       title: 'War and Peace',
-      authors: [{ name: 'Tolstoy, Leo', birth_year: 1828, death_year: 1910 }],
+      authors: [{ name: 'Tolstoy, Leo', birth_year: 1828, death_year: 1910, ...authorExtras }],
       translators: [{ name: 'Maude, Aylmer', birth_year: 1858, death_year: 1938 }],
     };
     mockGutendexService.getBook.mockResolvedValue(translatedBook);
@@ -209,9 +307,10 @@ describe('gutenbergGetBook', () => {
 
   describe('format()', () => {
     const fullOutput = {
+      ...extraMetadata,
       id: 1342,
       title: 'Pride and Prejudice',
-      authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+      authors: mockBook.authors,
       translators: [],
       editors: [],
       subjects: ['English fiction'],
@@ -423,11 +522,12 @@ describe('gutenbergGetBook — content[] reads back as structuredContent', () =>
   const render = (book: BookOutput) => (gutenbergGetBook.format!(book)[0] as { text: string }).text;
   const read = (book: BookOutput) => readBack(render(book));
 
-  const person = (p: Person) =>
+  const person = (p: BookOutput['translators'][number]) =>
     p.birth_year != null || p.death_year != null
       ? `${p.name} (${p.birth_year ?? '?'}–${p.death_year ?? '?'})`
       : p.name;
-  const people = (list: Person[]) => (list.length > 0 ? list.map(person).join(', ') : 'None');
+  const people = (list: BookOutput['translators']) =>
+    list.length > 0 ? list.map(person).join(', ') : 'None';
 
   /** The page a reader should get, written from the raw values instead of from format(). */
   function wantPage(book: BookOutput): string {
@@ -445,23 +545,38 @@ describe('gutenbergGetBook — content[] reads back as structuredContent', () =>
       [
         `ID: ${book.id} | Media: ${book.media_type} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()}`,
         `Authors: ${people(book.authors)}`,
+        ...book.authors.map(
+          (_, index) => `Author ${index + 1} aliases: Not available | Webpage: Not available`,
+        ),
         `Translators: ${people(book.translators)}`,
         `Editors: ${people(book.editors)}`,
+        'Contributors: Not available',
+        'Alternative titles: Not available',
         `Languages: ${book.languages.join(', ')} | Copyright: Public Domain (USA)`,
         `Subjects: ${list(book.subjects)}`,
+        'LCC: Not available',
         `Bookshelves: ${list(book.bookshelves)}`,
+        'Release date: Not available',
+        'Source imprint: Not available',
+        'Reading ease: Not available',
       ].join('\n'),
       ...(notes?.length
         ? [`${summary}\nSource notes:`, lf(notes.join('\n')), additionalLine]
         : [`${summary}\nSource notes: ${notes ? 'None' : 'Not available'}\n${additionalLine}`]),
       ...(additional.length > 0 ? [lf(additional.join('\n'))] : []),
+      'Contents: Not available',
       'Plain text available: Yes | Readable: Yes — use gutenberg_get_text',
       ...(mimes.length > 0 ? ['Formats:', mimes.join('\n')] : ['Formats: None']),
     ].join('\n\n');
   }
 
-  const austen = { name: 'Austen, Jane', birth_year: 1775, death_year: 1817 };
-  const active: Person = { name: ACTIVE_MARKDOWN, birth_year: 1775, death_year: 1817 };
+  const austen = mockBook.authors[0]!;
+  const active: Person = {
+    name: ACTIVE_MARKDOWN,
+    birth_year: 1775,
+    death_year: 1817,
+    ...authorExtras,
+  };
 
   /** Each case holds syntax in one slot only, so a failure names that slot's missing escape. */
   it.each<[string, Partial<BookOutput>]>([
@@ -511,7 +626,9 @@ describe('gutenbergGetBook — content[] reads back as structuredContent', () =>
     mockGutendexService.getBook.mockResolvedValue(book);
     const result = await runToolContract(gutenbergGetBook, { id });
     expect(result.structuredContent).toMatchObject(change);
-    expect(readBack(contentText(result)).text).toBe(wantPage(book));
+    const text = readBack(contentText(result)).text;
+    expect(text).toContain(wantPage(book));
+    expect(text).toContain('Catalog source: mirror\nCatalog as of: null');
   });
 
   it('leaves a value with nothing to encode byte-identical', () => {
@@ -666,7 +783,10 @@ describe('gutenbergGetBook — content[] reads back as structuredContent', () =>
       .record({
         title: hostileLine,
         media_type: hostileLine,
-        authors: fc.array(name, { maxLength: 2 }),
+        authors: fc.array(
+          name.map((person) => ({ ...person, ...authorExtras })),
+          { maxLength: 2 },
+        ),
         translators: fc.array(name, { maxLength: 2 }),
         editors: fc.array(name, { maxLength: 2 }),
         languages: fc.array(hostileLine, { maxLength: 2 }),
@@ -792,8 +912,8 @@ describe('gutenbergGetBook — per-book RDF lookup', () => {
       gutenbergTextBaseUrl: MIRROR_HOST,
       mirrorPath: ':memory:',
     });
-    mockGutendexService.getBook.mockImplementation((id: number, ctx: Context) =>
-      service.getBook(id, ctx),
+    mockGutendexService.getBookWithProvenance.mockImplementation((id: number, ctx: Context) =>
+      service.getBookWithProvenance(id, ctx),
     );
     http = createFetchMock();
     http.install();
@@ -801,7 +921,7 @@ describe('gutenbergGetBook — per-book RDF lookup', () => {
 
   afterEach(() => {
     http.restore();
-    mockGutendexService.getBook.mockReset();
+    mockGutendexService.getBookWithProvenance.mockReset();
     vi.useRealTimers();
   });
 
@@ -822,8 +942,11 @@ describe('gutenbergGetBook — per-book RDF lookup', () => {
       title: 'Mothers still',
       source_notes: [note],
       is_readable: true,
+      catalogSource: 'rdf',
+      catalogAsOf: null,
     });
     expect(clientText(result)).toContain(note);
+    expect(clientText(result)).toContain('Catalog source: rdf\nCatalog as of: null');
     expect(http.calls.map((call) => call.request.url)).toEqual([rdfUrl(79964)]);
   });
 

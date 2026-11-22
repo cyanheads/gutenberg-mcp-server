@@ -54,7 +54,9 @@ function stallingResponder(request: Request): Promise<Response> {
 const book: Book = {
   id: BOOK_ID,
   title: 'Pride and Prejudice',
-  authors: [{ name: 'Austen, Jane', birth_year: 1775, death_year: 1817 }],
+  authors: [
+    { name: 'Austen, Jane', birth_year: 1775, death_year: 1817, aliases: null, webpage: null },
+  ],
   translators: [],
   editors: [],
   subjects: [],
@@ -69,6 +71,13 @@ const book: Book = {
   has_plain_text: true,
   is_readable: true,
   source_notes: null,
+  alternative_titles: null,
+  contents: null,
+  contributors: null,
+  lcc: null,
+  reading_ease: null,
+  release_date: null,
+  source_imprint: null,
 };
 
 const MIRROR_FILE = [

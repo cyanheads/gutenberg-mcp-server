@@ -52,6 +52,7 @@ const makeBook = (n: number) => ({
   formats: { 'text/plain; charset=utf-8': `https://www.gutenberg.org/ebooks/${n}.txt.utf-8` },
   has_plain_text: true,
   is_readable: true,
+  lcc: null,
 });
 
 beforeEach(() => {
@@ -63,7 +64,13 @@ describe('gutenbergBrowsePopular', () => {
     'preserves executable filters without skipping unseen books at limit %i',
     async (limit) => {
       mockGutendexService.searchBooks.mockResolvedValue({
-        books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
+        source: 'mirror',
+        catalogAsOf: '2026-11-15T15:40:13.000Z',
+        books: Array.from({ length: 32 }, (_, i) => ({
+          ...makeBook(i + 1),
+          media_type: 'Sound',
+          lcc: ['PS'],
+        })),
         totalCount: 64,
         hasMore: true,
         page: 1,
@@ -74,13 +81,19 @@ describe('gutenbergBrowsePopular', () => {
         topic: ' fiction ',
         mime_type: 'text/',
         copyright: ['false', 'null'],
+        media_type: [' Sound '],
+        lcc: [' PS ', ''],
       });
       expect(result.structuredContent).toMatchObject({
+        catalogSource: 'mirror',
+        catalogAsOf: '2026-11-15T15:40:13.000Z',
         effectiveCriteria: {
           languages: ['en'],
           topic: 'fiction',
           mime_type: 'text/',
           copyright: ['false', 'null'],
+          media_type: ['Sound'],
+          lcc: ['PS'],
           sort: 'popular',
           page: 1,
         },
@@ -91,6 +104,8 @@ describe('gutenbergBrowsePopular', () => {
             topic: 'fiction',
             mime_type: 'text/',
             copyright: ['false', 'null'],
+            media_type: ['Sound'],
+            lcc: ['PS'],
             sort: 'popular',
             page: limit === 32 ? 2 : 1,
           },
@@ -99,11 +114,22 @@ describe('gutenbergBrowsePopular', () => {
       const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
       expect(text).toContain('text/');
       expect(text).toContain(`"page":${limit === 32 ? 2 : 1}`);
+      const parsed = readBack(contentText(result));
+      expect(parsed.text).toContain('Media: Sound | LCC: PS');
+      expect(parsed.text).toContain(
+        'Catalog source: mirror\nCatalog as of: 2026-11-15T15:40:13.000Z',
+      );
+      expect(JSON.parse(parsed.codeSpans[1]!)).toMatchObject({
+        media_type: ['Sound'],
+        lcc: ['PS'],
+      });
     },
   );
 
   it('keeps empty browse successful with caps and a notice on both surfaces', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [],
       totalCount: 0,
       hasMore: false,
@@ -138,6 +164,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('renders readability and the snapshot window for counts and the omitted-result ceiling', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [{ ...makeBook(1), is_readable: true, has_plain_text: false }],
       totalCount: 100,
       hasMore: true,
@@ -155,6 +183,8 @@ describe('gutenbergBrowsePopular', () => {
   });
   it.each([32, 33, 1_000_000])('caps a requested %i books on both surfaces', async (limit) => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
       totalCount: 100,
       hasMore: true,
@@ -176,7 +206,7 @@ describe('gutenbergBrowsePopular', () => {
     const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
     expect(text).toContain(`Requested limit: ${limit.toLocaleString()}`);
     expect(text).toContain('Applied limit: 32');
-    expect(text).toContain('same language/topic');
+    expect(text).toContain('gutenberg_search_books continuation above');
     expect(mockGutendexService.searchBooks).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ sort: 'popular', languages: ['en'], topic: 'fiction', page: 1 }),
       expect.anything(),
@@ -185,6 +215,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('keeps short clamped results complete', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 1,
       hasMore: false,
@@ -210,6 +242,8 @@ describe('gutenbergBrowsePopular', () => {
   it('returns the top N books ordered by popularity', async () => {
     const allBooks = Array.from({ length: 32 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: allBooks,
       totalCount: 65000,
       hasMore: true,
@@ -228,6 +262,8 @@ describe('gutenbergBrowsePopular', () => {
   it('discloses truncation when the catalog holds more than the returned page', async () => {
     const allBooks = Array.from({ length: 32 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: allBooks,
       totalCount: 65000,
       hasMore: true,
@@ -249,6 +285,8 @@ describe('gutenbergBrowsePopular', () => {
   it('reports the result set as complete when all matches are returned', async () => {
     const allBooks = Array.from({ length: 3 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: allBooks,
       totalCount: 3,
       hasMore: false,
@@ -268,6 +306,8 @@ describe('gutenbergBrowsePopular', () => {
   it('applies limit default of 20', async () => {
     const allBooks = Array.from({ length: 32 }, (_, i) => makeBook(i + 1));
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: allBooks,
       totalCount: 65000,
       hasMore: true,
@@ -284,6 +324,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('passes sort=popular to the service', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 1,
       hasMore: false,
@@ -302,6 +344,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('passes language filter to the service when provided', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 500,
       hasMore: false,
@@ -320,6 +364,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('strips empty languages array before passing to service', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 1,
       hasMore: false,
@@ -338,6 +384,8 @@ describe('gutenbergBrowsePopular', () => {
 
   it('returns an empty collection when service returns empty books', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [],
       totalCount: 0,
       hasMore: false,
@@ -358,6 +406,8 @@ describe('gutenbergBrowsePopular', () => {
   it('handles a book with no authors (sparse upstream)', async () => {
     const bookNoAuthor = { ...makeBook(1), authors: [] };
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [bookNoAuthor],
       totalCount: 1,
       hasMore: false,
@@ -391,7 +441,7 @@ describe('gutenbergBrowsePopular', () => {
       const line = trailer?.truncationCeiling?.render?.(103120);
       expect(line).toContain('103,120');
       expect(line).toContain('gutenberg_search_books');
-      expect(line).toContain('sort="popular"');
+      expect(line).toContain('continuation above');
     });
 
     it('renders no truncationCeiling line when the value is absent', () => {
@@ -422,6 +472,8 @@ describe('gutenbergBrowsePopular', () => {
             download_count: 75000,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
           {
             id: 11,
@@ -431,6 +483,8 @@ describe('gutenbergBrowsePopular', () => {
             download_count: 65000,
             has_plain_text: true,
             is_readable: true,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalInCatalog: 65000,
@@ -462,6 +516,8 @@ describe('gutenbergBrowsePopular', () => {
             download_count: 100,
             has_plain_text: false,
             is_readable: false,
+            media_type: 'Text',
+            lcc: null,
           },
         ],
         totalInCatalog: 1,
@@ -488,6 +544,8 @@ describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
 
   it('returns a complete result when the catalog holds no more than the limit', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 1,
       hasMore: false,
@@ -507,6 +565,8 @@ describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
 
   it('states completeness in the content[] trailer without the truncation sentence', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [makeBook(1)],
       totalCount: 1,
       hasMore: false,
@@ -524,6 +584,8 @@ describe('gutenbergBrowsePopular — enrichment on both surfaces', () => {
 
   it('still discloses truncation on both surfaces when the catalog holds more', async () => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: Array.from({ length: 32 }, (_, i) => makeBook(i + 1)),
       totalCount: 65000,
       hasMore: true,
@@ -561,6 +623,8 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
     download_count: 75000,
     has_plain_text: true,
     is_readable: true,
+    media_type: 'Text',
+    lcc: null,
   };
   const render = (books: Row[]) =>
     (
@@ -576,7 +640,7 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
   function wantList(books: Row[]): string {
     const items = books.map((book) => {
       const authors = book.authors.map((a) => `${a.name} (${a.birth_year ?? '?'}–${a.death_year})`);
-      return `[${book.id}] ${book.title} — ${authors.join(', ') || 'Unknown'}\nLang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: Yes | Readable: Yes`;
+      return `[${book.id}] ${book.title} — ${authors.join(', ') || 'Unknown'}\nLang: ${book.languages.join(', ')} | Downloads in the last 30 days (source snapshot): ${book.download_count.toLocaleString()} | Plain text: Yes | Readable: Yes\nMedia: ${book.media_type} | LCC: ${book.lcc === null ? 'Not available' : book.lcc.join('; ') || 'None'}`;
     });
     return `Top ${books.length} of ${books.length} books in catalog\n\nRequested limit: 32 | Applied limit: 32\n\n${items.join('\n')}`;
   }
@@ -588,6 +652,9 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
     ['the title', { title: ACTIVE_MARKDOWN }],
     ['an author name', { authors: [row.authors[0]!, active] }],
     ['a language', { languages: ['en', ACTIVE_MARKDOWN] }],
+    ['a media type', { media_type: ACTIVE_MARKDOWN }],
+    ['an LCC value', { lcc: ['PS', ACTIVE_MARKDOWN] }],
+    ['an empty LCC list', { lcc: [] }],
   ])('reads %s back unchanged', (_slot, change) => {
     const books = [{ ...row, ...change }, row];
     expect(readBack(render(books)).text).toBe(wantList(books));
@@ -599,6 +666,8 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
     [30121, 'The Art of Confectionary: ... Figs, Grapes, &amp;c., Flowers and Herbs; ...'],
   ])('reads the title of %i back through the wire contract', async (id, title) => {
     mockGutendexService.searchBooks.mockResolvedValue({
+      source: 'live',
+      catalogAsOf: null,
       books: [{ ...makeBook(id), title }],
       totalCount: 1,
       hasMore: false,
@@ -609,7 +678,7 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
     expect(readBack(contentText(result)).blocks[2]).toEqual({
       container: 'list',
       kind: 'paragraph',
-      text: `[${id}] ${title} — Author ${id} (1800–1900)\nLang: en | Downloads in the last 30 days (source snapshot): ${(10000 - id).toLocaleString()} | Plain text: Yes | Readable: Yes`,
+      text: `[${id}] ${title} — Author ${id} (1800–1900)\nLang: en | Downloads in the last 30 days (source snapshot): ${(10000 - id).toLocaleString()} | Plain text: Yes | Readable: Yes\nMedia: Text | LCC: Not available`,
     });
   });
 
@@ -641,6 +710,8 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
 
   describe('criteria and continuation trailers', () => {
     const matches = (count: number) => ({
+      source: 'live',
+      catalogAsOf: null,
       books: Array.from({ length: 2 }, (_, i) => makeBook(i + 1)),
       totalCount: count,
       hasMore: false,
@@ -723,6 +794,7 @@ describe('gutenbergBrowsePopular — content[] reads back as structuredContent',
     it('keeps the criteria line and notice on an empty result', async () => {
       mockGutendexService.searchBooks.mockResolvedValue({
         source: 'live',
+        catalogAsOf: null,
         books: [],
         totalCount: 0,
         hasMore: false,
@@ -799,6 +871,27 @@ describe('gutenbergBrowsePopular — catalog_rejected', () => {
   afterEach(() => {
     http.restore();
     mockGutendexService.searchBooks.mockReset();
+  });
+
+  it.each([
+    ['media_type', ['Sound']],
+    ['lcc', ['P']],
+  ])('reports a mirror-only %s filter with recovery and no request', async (filter, value) => {
+    const result = await runToolContract(gutenbergBrowsePopular, { [filter]: value });
+    const hint = gutenbergBrowsePopular.errors?.find(
+      (error) => error.reason === 'filter_requires_mirror',
+    )?.recovery;
+
+    expect(result.isError).toBe(true);
+    expect(hint).toEqual(expect.any(String));
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'filter_requires_mirror', filter, recovery: { hint } },
+      },
+    });
+    expect(readBack(contentText(result)).text).toContain(`Recovery: ${hint}`);
+    expect(http.calls).toHaveLength(0);
   });
 
   it('fails a live HTTP 401 after one request, with the declared recovery and no host on either surface', async () => {
